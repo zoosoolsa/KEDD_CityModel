@@ -221,7 +221,7 @@ class App(tk.Tk):
         self.v_key = tk.StringVar()
         ttk.Entry(t_set, textvariable=self.v_key, width=60, show="•").grid(row=2, column=1, sticky="we", **pad)
         ttk.Button(t_set, text="저장·확인", command=self._save_key).grid(row=2, column=2, **pad)
-        ttk.Label(t_set, text="인증키 발급 시 서비스 URL 은 http://localhost:47380 으로 입력하세요. 키는 운영체제 키체인에 저장됩니다.",
+        ttk.Label(t_set, text="인증키 발급 시 서비스 URL 은 http://localhost:47380 으로 입력하세요. 키는 이 컴퓨터에만 저장됩니다.",
                   foreground=DIM).grid(row=3, column=1, sticky="w", **pad)
         ttk.Button(t_set, text="고급 설정…", command=self._advanced).grid(row=4, column=1, sticky="w", **pad)
 
@@ -251,6 +251,8 @@ class App(tk.Tk):
         self.v_api.set(s.api_heights)
         self.v_prev.set(s.thumbnails)
         self.v_key.set(vworld_api.get_key())
+        if not self.v_key.get():
+            self._log("ⓘ 브이월드 인증키가 없습니다. [설정] 탭에서 입력하고 [저장·확인]을 눌러 주세요 (지도·지적도 도로에 필요).")
         for k, b in self.col_btns.items():
             b.config(bg=_lin2hex(getattr(s, k)))
         self._refresh_lib()
@@ -550,7 +552,7 @@ class App(tk.Tk):
 
         def work():
             ok, m = vworld_api.test_key(k)
-            self.q.put(("log", ("✔ " if ok else "✖ ") + m + f" (저장 위치: {'키체인' if where == 'keychain' else '사용자 폴더'})"))
+            self.q.put(("log", ("✔ " if ok else "✖ ") + m + f" (저장 위치: {'자격 증명 관리자' if where == 'keychain' else '사용자 폴더 개인 파일'})"))
         threading.Thread(target=work, daemon=True).start()
 
     def _pick_color(self, key):

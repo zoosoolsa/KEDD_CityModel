@@ -1,6 +1,6 @@
 """브이월드 오픈API: 인증키 보관 + 도로명주소건물(LT_C_SPBD)·연속지적도 도로 필지(LP_PA_CBND_BUBUN) 수집.
 
-- 키는 운영체제 키체인(macOS 키체인 / Windows 자격 증명 관리자)에 저장, 실패하면 홈 폴더 파일(권한 600)
+- 키 저장: Windows 는 자격 증명 관리자, macOS 는 홈 폴더 개인 파일(권한 600) — 서명 없는 앱이라 키체인은 업데이트마다 허용 창이 뜸
 - 데이터 API 제한: 요청당 최대 1,000건, 범위 2km² 이하 → 1.4km 격자로 나눠 요청하고 칸마다 캐시
 """
 import concurrent.futures as cf
@@ -8,6 +8,7 @@ import datetime as dt
 import json
 import os
 import ssl
+import sys
 import time
 import urllib.parse
 import urllib.request
@@ -23,41 +24,58 @@ CACHE_DAYS = 35
 _FALLBACK = os.path.join(os.path.expanduser("~"), ".kedd_citymodel_key")
 
 
+# macOS: 서명 없는 앱은 업데이트마다 키체인 허용 창이 떠서 키체인을 쓰지 않고
+#        홈 폴더의 개인 파일(권한 600)에 저장. Windows: 자격 증명 관리자(창 안 뜸).
+_USE_KEYRING = sys.platform.startswith("win")
+_cache = {"key": None}
+
+
 def get_key():
-    try:
-        import keyring
-        k = keyring.get_password(SERVICE, USER)
-        if k:
-            return k
-    except Exception:
-        pass
+    if _cache["key"] is not None:
+        return _cache["key"]
+    k = ""
     if os.path.exists(_FALLBACK):
-        return open(_FALLBACK, encoding="utf-8").read().strip()
-    return ""
+        k = open(_FALLBACK, encoding="utf-8").read().strip()
+    if not k and _USE_KEYRING:
+        try:
+            import keyring
+            k = keyring.get_password(SERVICE, USER) or ""
+        except Exception:
+            pass
+    _cache["key"] = k
+    return k
 
 
 def set_key(k):
     k = (k or "").strip()
-    try:
-        import keyring
-        if k:
-            keyring.set_password(SERVICE, USER, k)
-        else:
-            try:
-                keyring.delete_password(SERVICE, USER)
-            except Exception:
-                pass
-        if os.path.exists(_FALLBACK):
-            os.remove(_FALLBACK)
-        return "keychain"
-    except Exception:
-        with open(_FALLBACK, "w", encoding="utf-8") as f:
-            f.write(k)
+    _cache["key"] = k
+    if _USE_KEYRING:
         try:
-            os.chmod(_FALLBACK, 0o600)
+            import keyring
+            if k:
+                keyring.set_password(SERVICE, USER, k)
+            else:
+                try:
+                    keyring.delete_password(SERVICE, USER)
+                except Exception:
+                    pass
+            if os.path.exists(_FALLBACK):
+                os.remove(_FALLBACK)
+            return "keychain"
         except Exception:
             pass
+    if not k:
+        if os.path.exists(_FALLBACK):
+            os.remove(_FALLBACK)
         return "file"
+    fd = os.open(_FALLBACK, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w", encoding="utf-8") as f:
+        f.write(k)
+    try:
+        os.chmod(_FALLBACK, 0o600)
+    except Exception:
+        pass
+    return "file"
 
 
 class ApiError(Exception):

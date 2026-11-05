@@ -135,17 +135,33 @@ class Terrain:
 class MeshAcc:
     """폴리곤 메쉬 누적 → npz (v, loops, ptot, mat)"""
 
-    def __init__(self):
+    def __init__(self, max_edge=None):
         self.V, self.L, self.P, self.M = [], [], [], []
         self.n = 0
+        self.max_edge = max_edge        # 평면(xy) 변 길이 상한 — 원본 데이터 오류로 생긴 km 단위 조각 제거
+        self.dropped = 0
 
     def add(self, verts, polys, mats=None):
         verts = np.asarray(verts, np.float32)
+        if mats is None:
+            mats = [0] * len(polys)
+        if self.max_edge:
+            keep_p, keep_m = [], []
+            for p, m in zip(polys, mats):
+                q = verts[np.asarray(p)][:, :2].astype(np.float64)
+                if np.hypot(*(np.roll(q, -1, 0) - q).T).max() <= self.max_edge and np.isfinite(q).all():
+                    keep_p.append(p)
+                    keep_m.append(m)
+                else:
+                    self.dropped += 1
+            polys, mats = keep_p, keep_m
+            if not polys:
+                return
         self.V.append(verts)
         for p in polys:
             self.L.append(np.asarray(p, np.int32) + self.n)
             self.P.append(len(p))
-        self.M.extend(mats if mats is not None else [0] * len(polys))
+        self.M.extend(mats)
         self.n += len(verts)
 
     def add_prism(self, ring, bot, top):

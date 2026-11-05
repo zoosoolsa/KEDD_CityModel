@@ -109,7 +109,12 @@ def build_terrain(s, rep: Reporter, out_path, tm_bounds=None):
     wgt = np.clip((slope - 0.04) / 0.08, 0, 1)
     ground = smooth * (1 - wgt) + ground * wgt
     wl = float(np.median(out[water])) if water.any() else 0.0
-    ground[water] = wl - 2.0
+    # 수면 높이는 영역 전체 중앙값이 아니라 주변 값으로 (따로 만든 이웃 타일과 경계가 어긋나지 않게)
+    if water.any():
+        wv = np.where(water, out, 0.0)
+        wn = nd.gaussian_filter(water.astype(np.float32), 8.0)
+        local = nd.gaussian_filter(wv, 8.0) / np.maximum(wn, 1e-3)
+        ground[water] = local[water] - 2.0
 
     np.savez_compressed(out_path, z=ground.astype(np.float32), water=water.astype(np.uint8), res=res,
                         x0=xmin - cx, y0=ymax - cy, water_level=wl, origin=np.array([cx, cy], float))

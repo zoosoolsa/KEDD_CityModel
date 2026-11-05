@@ -19,8 +19,10 @@ from .util import MeshAcc, Terrain, Reporter, to_tm, to_ll
 
 Image.MAX_IMAGE_PIXELS = None
 TILE = 4000.0
-TILE_VERSION = 7          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
+TILE_VERSION = 8          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
 KINDS = ("bld", "rd_major", "rd_minor", "br")
+# 종류별 평면 변 길이 상한 (m): 도로 조각은 25m 삼각형 안, 다리는 10m 간격, 건물은 큰 공장·역사도 수백 m
+MAX_EDGE = {"bld": 700.0, "rd_major": 40.0, "rd_minor": 40.0, "br": 80.0}
 
 
 # ------------------------------------------------------------------ 기본
@@ -88,8 +90,11 @@ class TileSink:
             return None
         a = self.accs.get((k, kind))
         if a is None:
-            a = self.accs[(k, kind)] = MeshAcc()
+            a = self.accs[(k, kind)] = MeshAcc(max_edge=MAX_EDGE.get(kind))
         return a
+
+    def dropped(self):
+        return sum(a.dropped for a in self.accs.values())
 
     def save(self, store):
         tot = 0
@@ -234,6 +239,9 @@ def build_tiles(store: Store, keys, s, rep: Reporter, sources_for, cancel=lambda
         rep.set_stage(*_sub(rep, gi, len(groups), 0.00, 0.15), f"{tag} 지형")
         tpath = os.path.join(work, "terrain_region.npz")
         dem.build_terrain(ss, rep, tpath, tm_bounds=region)
+        n_snap = _snap_to_neighbors(store, comp, tpath)
+        if n_snap:
+            rep.log(f"   이미 있는 이웃 타일 {n_snap}면에 경계 높이 맞춤")
         terrain = Terrain(tpath, exag=store.exag)
         origin = terrain.origin
 
@@ -250,6 +258,8 @@ def build_tiles(store: Store, keys, s, rep: Reporter, sources_for, cancel=lambda
         roads.build_roads(ss, osm, terrain, rep, sink)
 
         rep.set_stage(*_sub(rep, gi, len(groups), 0.95, 1.00), f"{tag} 지면 텍스처·타일 저장")
+        if sink.dropped():
+            rep.log(f"   비정상 형상 {sink.dropped():,}면 제외 (원본 데이터 오류)")
         sink.save(store)
         _save_terrain_tiles(store, comp, terrain, lcs, ss.lc_res, rep)
         for k in comp:
@@ -268,6 +278,90 @@ def _sub(rep, gi, n, a, b):
     return lo + span * (gi + a), lo + span * (gi + b)
 
 
+SNAP_BLEND = 6      # 경계에서 안쪽으로 높이 차이를 줄여 가는 칸 수 (25m × 6 = 150m)
+_DIRS = {(1, 0): "E", (-1, 0): "W", (0, 1): "N", (0, -1): "S"}
+
+
+def _snap_to_neighbors(store, comp, tpath):
+    """영역 지형의 경계를 이미 있는(이번에 만들지 않는) 이웃 타일 높이에 정확히 맞춤.
+    차이는 안쪽으로 SNAP_BLEND 칸에 걸쳐 서서히 줄인다. 반환: 맞춘 경계 수"""
+    d = dict(np.load(tpath))
+    z = d["z"].astype(np.float64)
+    res = float(d["res"])
+    cx, cy = (float(v) for v in d["origin"])
+    gx0, gy0 = float(d["x0"]) + cx, float(d["y0"]) + cy        # 격자 (0,0) 전역 좌표
+    T = TILE
+    n = int(round(T / res))
+    cset = set(map(tuple, comp))
+    cnt = 0
+    for k in comp:
+        c0 = int(round((k[0] * T - gx0) / res))
+        r0 = int(round((gy0 - (k[1] + 1) * T) / res))
+        for (dx, dy), side in _DIRS.items():
+            nk = (k[0] + dx, k[1] + dy)
+            if nk in cset:
+                continue
+            p = os.path.join(store.tile_dir(nk), "terrain.npz")
+            if not os.path.exists(p):
+                continue
+            nz = np.load(p)["z"].astype(np.float64)
+            if nz.shape != (n + 1, n + 1):
+                continue
+            if side == "E":
+                diff = nz[:, 0] - z[r0:r0 + n + 1, c0 + n]
+                for j in range(SNAP_BLEND + 1):
+                    z[r0:r0 + n + 1, c0 + n - j] += diff * (1 - j / (SNAP_BLEND + 1))
+            elif side == "W":
+                diff = nz[:, n] - z[r0:r0 + n + 1, c0]
+                for j in range(SNAP_BLEND + 1):
+                    z[r0:r0 + n + 1, c0 + j] += diff * (1 - j / (SNAP_BLEND + 1))
+            elif side == "N":
+                diff = nz[n, :] - z[r0, c0:c0 + n + 1]
+                for j in range(SNAP_BLEND + 1):
+                    z[r0 + j, c0:c0 + n + 1] += diff * (1 - j / (SNAP_BLEND + 1))
+            else:  # S
+                diff = nz[0, :] - z[r0 + n, c0:c0 + n + 1]
+                for j in range(SNAP_BLEND + 1):
+                    z[r0 + n - j, c0:c0 + n + 1] += diff * (1 - j / (SNAP_BLEND + 1))
+            cnt += 1
+    if cnt:
+        d["z"] = z.astype(np.float32)
+        np.savez_compressed(tpath, **d)
+    return cnt
+
+
+def _fix_pad_with_neighbors(store, k, zpad, cset=()):
+    """법선 계산용 여유 칸(zpad)을 이웃 타일의 실제 높이로 — 이웃과 음영이 이어지게.
+    이웃의 zpad 도 이 타일 값으로 갱신."""
+    n = zpad.shape[0] - 3
+    for (dx, dy), side in _DIRS.items():
+        nk = (k[0] + dx, k[1] + dy)
+        if nk in cset:                     # 같이 만드는 타일은 영역 값이 이미 이어짐
+            continue
+        p = os.path.join(store.tile_dir(nk), "terrain.npz")
+        if not os.path.exists(p):
+            continue
+        nd_ = dict(np.load(p))
+        nz, npad = nd_["z"], nd_["zpad"].copy()
+        if nz.shape != (n + 1, n + 1):
+            continue
+        core = zpad[1:-1, 1:-1]
+        if side == "E":
+            zpad[1:-1, -1] = nz[:, 1]
+            npad[1:-1, 0] = core[:, n - 1]
+        elif side == "W":
+            zpad[1:-1, 0] = nz[:, n - 1]
+            npad[1:-1, -1] = core[:, 1]
+        elif side == "N":
+            zpad[0, 1:-1] = nz[n - 1, :]
+            npad[-1, 1:-1] = core[1, :]
+        else:
+            zpad[-1, 1:-1] = nz[1, :]
+            npad[0, 1:-1] = core[n - 1, :]
+        nd_["zpad"] = npad
+        np.savez_compressed(p, **nd_)
+
+
 def _save_terrain_tiles(store, comp, terrain, lcs, lres, rep=None):
     T = TILE
     res = terrain.res
@@ -284,6 +378,7 @@ def _save_terrain_tiles(store, comp, terrain, lcs, lres, rep=None):
         w = terrain.water[r0:r0 + n + 1, c0:c0 + n + 1]
         d = store.tile_dir(k)
         os.makedirs(d, exist_ok=True)
+        _fix_pad_with_neighbors(store, k, z, set(map(tuple, comp)))
         np.savez_compressed(os.path.join(d, "terrain.npz"), z=z[1:-1, 1:-1], zpad=z, water=w, res=res)
         img = lcs.render_tile((tx0, ty1 - T, tx0 + T, ty1), terrain, lres)
         Image.fromarray(img, "RGB").save(os.path.join(d, "landcover.png"), compress_level=6)

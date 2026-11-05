@@ -33,11 +33,13 @@ def plan(s: Settings, project_name, cams, rep: Reporter = None):
     pbf_ver = _osm_version(s)
     from . import vworld_api
     api_on = bool(s.api_heights and vworld_api.get_key())
-    wanted = {k: store.wanted_sources(k, gis, pbf_ver, extra=dict(api=api_on)) for k in needed}
-    states = {k: (store.tile_state(k, wanted[k]) if pbf_ver else ("ok" if store.tile_meta(k) else "missing")) for k in needed}
     proj = Project(store, project_name)
+    allk = needed | {tuple(k) for k in proj.d["tiles"]}
+    wanted = {k: store.wanted_sources(k, gis, pbf_ver, extra=dict(api=api_on)) for k in allk}
+    states = {k: (store.tile_state(k, wanted[k]) if pbf_ver else ("ok" if store.tile_meta(k) else "missing")) for k in allk}
     build = sorted(k for k, st in states.items() if st != "ok")
     cam_only = not build and proj.is_current(needed)
+    needed = allk if build else needed
     return dict(store=store, project=proj, needed=needed, build=build, states=states, wanted=wanted,
                 camera_only=cam_only, gis=gis, exag_changed=abs(store.exag - s.exag) > 1e-6)
 
@@ -127,7 +129,9 @@ def run_job(s: Settings, project_name, cams, rep: Reporter, cancel=lambda: False
     from . import vworld_api
     api_on = bool(s.api_heights and vworld_api.get_key())
     sources_for = lambda k: store.wanted_sources(k, gis, osm_ver, extra=dict(api=api_on))
-    build = sorted(k for k in needed if store.tile_state(k, sources_for(k)) != "ok")
+    # 이 프로젝트에 이미 들어 있는 타일도 예전 방식이면 함께 다시 만듦 (섞이면 경계가 어긋남)
+    have = {tuple(k) for k in proj.d["tiles"]}
+    build = sorted(k for k in (needed | have) if store.tile_state(k, sources_for(k)) != "ok")
     rep.log(f"   필요한 타일 {len(needed)}개 (4km) · 새로/다시 만들 타일 {len(build)}개")
 
     if not build and proj.is_current(needed):
