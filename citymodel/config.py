@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 from typing import List
 
 APP_NAME = "KEDD CityModel"
-APP_VERSION = "1.0.0"
+APP_VERSION = "1.1.0"
 
 # 대략적인 시/도 범위 (경도 min, 위도 min, 경도 max, 위도 max)
 PRESETS = {
@@ -37,7 +37,9 @@ class Settings:
     lon_max: float = 127.27
     lat_max: float = 37.76
     # 입력
-    building_zips: List[str] = field(default_factory=list)   # 브이월드 GIS건물통합정보 zip/shp
+    building_lib: str = os.path.join(os.path.expanduser("~"), "CityModel", "건물데이터")  # 시도별 GIS건물통합정보 zip 폴더
+    building_zips: List[str] = field(default_factory=list)   # (선택) 실행 시 라이브러리로 가져올 zip
+    camera_url: str = ""         # 웹 지도 URL (구글/구글어스/네이버/카카오/브이월드) → 카메라
     osm_pbf: str = ""            # 비우면 자동 다운로드 (Geofabrik south-korea)
     dem_files: List[str] = field(default_factory=list)       # 비우면 Copernicus 자동 다운로드
     work_dir: str = os.path.join(os.path.expanduser("~"), "CityModel")
@@ -102,11 +104,18 @@ class Settings:
         h = (self.lat_max - self.lat_min) * 111.0
         if w * h > 6000:
             errs.append(f"범위가 너무 큽니다 ({w:.0f}×{h:.0f}km). 약 80×75km 이하로 줄여주세요.")
-        if not self.building_zips:
-            errs.append("브이월드 GIS건물통합정보 파일(zip)을 하나 이상 지정하세요.")
         for p in self.building_zips:
             if not os.path.exists(p):
                 errs.append(f"파일이 없습니다: {p}")
+        import glob as _g
+        if not self.building_zips and not _g.glob(os.path.join(self.building_lib, "AL_D010_*.zip")):
+            errs.append("건물 데이터 폴더에 GIS건물통합정보 zip(AL_D010_시도_날짜.zip)이 없습니다.")
+        if self.camera_url.strip():
+            try:
+                from .webcam import parse_url
+                parse_url(self.camera_url)
+            except Exception as e:
+                errs.append(f"카메라 URL 해석 실패: {e}")
         if not self.project_name.strip():
             errs.append("프로젝트 이름을 입력하세요.")
         return errs

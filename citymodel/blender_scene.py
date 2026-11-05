@@ -170,6 +170,20 @@ def setup_ao(sc, world_col, world_str):
         Lk.new(ov.outputs[0], comp.inputs[0])
 
 
+def add_camera(sc, cam_cfg, name):
+    cd = bpy.data.cameras.new(name)
+    cd.sensor_fit = "VERTICAL"
+    cd.angle_y = math.radians(cam_cfg.get("fov", 35.0))
+    cd.clip_start = 10
+    cd.clip_end = 300000
+    cam = bpy.data.objects.new(name, cd)
+    sc.collection.objects.link(cam)
+    cam.location = Vector(cam_cfg["location"])
+    cam.rotation_euler = cam_cfg["rotation"]
+    sc.camera = cam
+    return cam
+
+
 def build():
     clear_scene()
     sc = bpy.context.scene
@@ -222,17 +236,7 @@ def build():
         print("loaded", os.path.basename(f), len(d["v"]), flush=True)
 
     # 카메라
-    cam_cfg = CFG["camera"]
-    tgt = Vector((cam_cfg["target"][0], cam_cfg["target"][1], 0.0))
-    cd = bpy.data.cameras.new("Cam")
-    cd.lens = cam_cfg["lens"]
-    cd.clip_start = 10
-    cd.clip_end = 300000
-    cam = bpy.data.objects.new("Camera", cd)
-    sc.collection.objects.link(cam)
-    cam.location = tgt + Vector((0, -cam_cfg["back"], cam_cfg["height"]))
-    cam.rotation_euler = (tgt - cam.location).to_track_quat("-Z", "Y").to_euler()
-    sc.camera = cam
+    add_camera(sc, CFG["camera"], "Camera")
 
     # 조명·월드
     sd = bpy.data.lights.new("Sun", "SUN")
@@ -279,6 +283,16 @@ def build():
                     if sp.type == "VIEW_3D":
                         sp.clip_start, sp.clip_end = 10, 300000
 
+
+if A.get("camera"):
+    # 기존 .blend 의 카메라만 교체: 새 카메라를 추가하고 활성 카메라로 지정
+    cam_cfg = json.load(open(A["camera"], encoding="utf-8"))
+    sc = bpy.context.scene
+    n = 1 + len([o for o in bpy.data.objects if o.type == "CAMERA"])
+    add_camera(sc, cam_cfg, f"Camera_{cam_cfg.get('source', 'web')}_{n}")
+    bpy.ops.wm.save_as_mainfile(filepath=bpy.data.filepath, compress=True)
+    print("SAVED", bpy.data.filepath, flush=True)
+    raise SystemExit(0)
 
 build()
 for im in bpy.data.images:

@@ -38,7 +38,7 @@ class App(tk.Tk):
     def __init__(self):
         super().__init__()
         self.title(f"{APP_NAME} {APP_VERSION}")
-        self.minsize(900, 680)
+        self.minsize(980, 820)
         self.s = Settings.load(SETTINGS_FILE) if os.path.exists(SETTINGS_FILE) else Settings()
         self.q = queue.Queue()
         self.worker = None
@@ -78,17 +78,35 @@ class App(tk.Tk):
         for v in self.v_bbox:
             v.trace_add("write", lambda *a: self._update_size())
 
-        # 2. 입력 데이터
-        f = ttk.LabelFrame(left, text="2. 데이터")
+        # 2. 건물 데이터 (전국 라이브러리)
+        f = ttk.LabelFrame(left, text="2. 건물 데이터 폴더 (브이월드 GIS건물통합정보, 시도별 zip)")
         f.pack(fill="x", **pad)
-        ttk.Label(f, text="브이월드 GIS건물통합정보 (시도별 zip, 여러 개 가능)").grid(row=0, column=0, columnspan=3, sticky="w", **pad)
-        self.lst_zip = tk.Listbox(f, height=4, width=44)
-        self.lst_zip.grid(row=1, column=0, columnspan=2, sticky="we", **pad)
+        self.v_lib = tk.StringVar()
+        ttk.Entry(f, textvariable=self.v_lib, width=38).grid(row=0, column=0, columnspan=3, sticky="we", **pad)
+        ttk.Button(f, text="…", width=3, command=self._pick_lib).grid(row=0, column=3, **pad)
+        self.tv = ttk.Treeview(f, columns=("name", "date", "count", "state"), show="headings", height=4)
+        for c, t, w in [("name", "시도", 110), ("date", "기준일", 90), ("count", "건물 수", 80), ("state", "상태", 90)]:
+            self.tv.heading(c, text=t)
+            self.tv.column(c, width=w, anchor="w")
+        self.tv.grid(row=1, column=0, columnspan=4, sticky="we", **pad)
         bf = ttk.Frame(f)
-        bf.grid(row=1, column=2, sticky="n")
-        ttk.Button(bf, text="추가…", command=self._add_zip).pack(fill="x")
-        ttk.Button(bf, text="삭제", command=self._del_zip).pack(fill="x", pady=2)
-        ttk.Label(f, text="지형·OSM 은 자동 다운로드됩니다 (직접 지정하려면 고급 설정)", foreground="#666").grid(row=2, column=0, columnspan=3, sticky="w", **pad)
+        bf.grid(row=2, column=0, columnspan=4, sticky="w", **pad)
+        for t, cmd in [("zip 추가…", self._add_zip), ("다운로드 폴더에서 가져오기", self._import_dl),
+                       ("브이월드 열기", self._open_vworld), ("폴더 열기", lambda: open_path(self._lib())),
+                       ("이전 버전 정리", self._clean_lib)]:
+            ttk.Button(bf, text=t, command=cmd).pack(side="left", padx=(0, 3))
+        ttk.Label(f, text="시도별 최신 zip만 사용 · 범위에 걸친 시도 자동 선택",
+                  foreground="#666", wraplength=420).grid(row=3, column=0, columnspan=4, sticky="w", **pad)
+
+        # 카메라
+        f = ttk.LabelFrame(left, text="카메라 (선택) — 웹 지도 주소창 URL")
+        f.pack(fill="x", **pad)
+        self.v_cam = tk.StringVar()
+        ttk.Entry(f, textvariable=self.v_cam, width=38).grid(row=0, column=0, sticky="we", **pad)
+        ttk.Button(f, text="확인", command=self._check_cam).grid(row=0, column=1, **pad)
+        ttk.Button(f, text="기존 .blend 에 적용…", command=self._apply_cam).grid(row=0, column=2, **pad)
+        self.lbl_cam = ttk.Label(f, text="구글 지도/어스, 네이버, 카카오, 브이월드 · 비우면 범위에 맞춘 기본 구도", foreground="#666")
+        self.lbl_cam.grid(row=1, column=0, columnspan=3, sticky="w", **pad)
 
         # 3. 출력
         f = ttk.LabelFrame(left, text="3. 출력")
@@ -148,7 +166,7 @@ class App(tk.Tk):
         self.txt = tk.Text(right, height=12, wrap="word", font=("Menlo" if sys.platform == "darwin" else "Consolas", 10))
         self.txt.pack(fill="both", expand=False, pady=(6, 0))
         self._log(f"{APP_NAME} {APP_VERSION}\n범위와 건물 파일을 지정하고 [생성 시작]을 누르세요.\n"
-                  "건물 파일: 브이월드 > 공간정보 다운로드 > GIS건물통합정보 > 시도 '전체데이터' (AL_D010_xx_날짜.zip)")
+                  "건물 데이터: [브이월드 열기] → GIS건물통합정보 '전체데이터'에서 시도별 zip 받기 → [다운로드 폴더에서 가져오기]")
 
     # ------------- 이벤트 -------------
     def _on_preset(self, *_):
@@ -166,15 +184,94 @@ class App(tk.Tk):
         except Exception:
             self.lbl_size.config(text="")
 
-    def _add_zip(self):
-        fs = filedialog.askopenfilenames(title="GIS건물통합정보 zip 선택", filetypes=[("zip / shp", "*.zip *.shp"), ("모든 파일", "*.*")])
-        for f in fs:
-            if f not in self.lst_zip.get(0, "end"):
-                self.lst_zip.insert("end", f)
+    def _lib(self):
+        return self.v_lib.get().strip() or self.s.building_lib
 
-    def _del_zip(self):
-        for i in reversed(self.lst_zip.curselection()):
-            self.lst_zip.delete(i)
+    def _pick_lib(self):
+        d = filedialog.askdirectory(initialdir=self._lib())
+        if d:
+            self.v_lib.set(d)
+            self._refresh_lib()
+
+    def _refresh_lib(self):
+        from . import library
+        for i in self.tv.get_children():
+            self.tv.delete(i)
+        lib = self._lib()
+        if not os.path.isdir(lib):
+            return
+        for r in library.status(lib):
+            st = ("갱신 권장" if r["stale"] else "최신") + ("" if r["indexed"] else " · 인덱스 전")
+            self.tv.insert("", "end", values=(r["name"], r["date"], f"{r['count']:,}" if r["count"] else "-", st))
+
+    def _add_zip(self):
+        from . import library
+        fs = filedialog.askopenfilenames(title="GIS건물통합정보 zip (AL_D010_시도_날짜.zip)", filetypes=[("zip", "*.zip")])
+        if fs:
+            got = library.import_files(self._lib(), fs)
+            bad = [os.path.basename(f) for f in fs if not library.FNAME.search(os.path.basename(f))]
+            self._log(f"건물 데이터 {len(got)}개 추가" + (f" (형식이 다른 파일 제외: {', '.join(bad)})" if bad else ""))
+            self._refresh_lib()
+
+    def _import_dl(self):
+        from . import library
+        found = library.find_in_downloads(self._lib())
+        if not found:
+            messagebox.showinfo("가져오기", "다운로드 폴더에 새 GIS건물통합정보 zip이 없습니다.")
+            return
+        names = "\n".join(os.path.basename(p) for p in found)
+        if messagebox.askyesno("가져오기", f"다음 파일을 건물 데이터 폴더로 옮길까요?\n\n{names}"):
+            got = library.import_files(self._lib(), found, move=True)
+            self._log(f"다운로드 폴더에서 {len(got)}개 가져옴")
+            self._refresh_lib()
+
+    def _open_vworld(self):
+        from . import library
+        import webbrowser
+        webbrowser.open(library.VWORLD_PAGE)
+        self._log("브이월드 GIS건물통합정보: 구분 '전체데이터'에서 필요한 시도를 받은 뒤 [다운로드 폴더에서 가져오기]를 누르세요.")
+
+    def _clean_lib(self):
+        from . import library
+        if messagebox.askyesno("정리", "시도별 최신 파일만 남기고 이전 날짜 zip과 쓰지 않는 인덱스를 삭제할까요?"):
+            n = library.remove_old(self._lib())
+            self._log(f"이전 버전 {n}개 삭제")
+            self._refresh_lib()
+
+    def _check_cam(self):
+        from .webcam import parse_url
+        try:
+            v = parse_url(self.v_cam.get())
+            self.lbl_cam.config(text=f"{v['source']}: 위도 {v['lat']:.5f}, 경도 {v['lon']:.5f}, 거리 {v['range']:.0f}m, "
+                                     f"방위 {v['heading']:.0f}°, 기울기 {v['tilt']:.0f}°, 화각 {v['fov']:.0f}°", foreground="#06c")
+            return v
+        except Exception as e:
+            self.lbl_cam.config(text=f"해석 실패: {e}", foreground="#c00")
+            return None
+
+    def _apply_cam(self):
+        if not self._check_cam():
+            return
+        f = filedialog.askopenfilename(title="카메라를 바꿀 .blend", filetypes=[("Blender", "*.blend")],
+                                       initialdir=self.s.project_dir)
+        if not f:
+            return
+        self._ui_to_settings()
+        self.s.project_name = os.path.basename(os.path.dirname(f))
+        self.s.work_dir = os.path.dirname(os.path.dirname(f))
+        if not os.path.exists(os.path.join(self.s.project_dir, "data", "terrain.npz")):
+            messagebox.showerror("카메라", "이 앱으로 만든 .blend 만 가능합니다 (옆에 data 폴더가 있어야 함).")
+            return
+
+        def work():
+            from .pipeline import update_camera
+            rep = Reporter(log=lambda m: self.q.put(("log", m)), progress=lambda p: self.q.put(("prog", p)))
+            try:
+                update_camera(self.s, f, rep)
+                self.q.put(("log", "✔ 카메라 적용 완료: " + f))
+            except Exception as e:
+                self.q.put(("log", "✖ " + str(e)))
+        threading.Thread(target=work, daemon=True).start()
 
     def _pick_work(self):
         d = filedialog.askdirectory(initialdir=self.v_work.get() or os.path.expanduser("~"))
@@ -250,9 +347,9 @@ class App(tk.Tk):
         s = self.s
         for v, x in zip(self.v_bbox, s.bbox):
             v.set(f"{x:.4f}")
-        self.lst_zip.delete(0, "end")
-        for p in s.building_zips:
-            self.lst_zip.insert("end", p)
+        self.v_lib.set(s.building_lib)
+        self.v_cam.set(s.camera_url)
+        self._refresh_lib()
         self.v_work.set(s.work_dir)
         self.v_name.set(s.project_name)
         self.v_blender.set(s.blender_path)
@@ -268,7 +365,9 @@ class App(tk.Tk):
     def _ui_to_settings(self):
         s = self.s
         s.lon_min, s.lat_min, s.lon_max, s.lat_max = [float(v.get()) for v in self.v_bbox]
-        s.building_zips = list(self.lst_zip.get(0, "end"))
+        s.building_lib = self._lib()
+        s.building_zips = []
+        s.camera_url = self.v_cam.get().strip()
         s.work_dir = self.v_work.get().strip()
         s.project_name = "".join(ch for ch in self.v_name.get().strip() if ch not in '\\/:*?"<>|')
         s.blender_path = self.v_blender.get().strip()
@@ -338,6 +437,7 @@ class App(tk.Tk):
                 elif kind == "done":
                     self.btn_run.config(state="normal")
                     self.btn_stop.config(state="disabled")
+                    self._refresh_lib()
                     if val:
                         out, previews = val
                         self._show_previews(previews)

@@ -1,57 +1,12 @@
 """건물: 브이월드 GIS건물통합정보 + OSM 보완 → 압출 메쉬 (지형 과장 반영된 절대 높이)."""
 import glob
 import os
-import zipfile
 import numpy as np
 import shapefile
 import shapely
 from shapely import wkb
 from shapely.geometry import Polygon, Point
-from pyproj import CRS, Transformer
 from .util import to_tm, ring_area, MeshAcc, Reporter
-
-
-def _extract_shps(paths, cache_dir, rep):
-    """zip 이면 풀어서 .shp 경로 목록 반환"""
-    shps = []
-    for p in paths:
-        if p.lower().endswith(".shp"):
-            shps.append(p)
-            continue
-        dest = os.path.join(cache_dir, "gis", os.path.splitext(os.path.basename(p))[0])
-        with zipfile.ZipFile(p) as z:
-            names = [n for n in z.namelist() if not n.startswith("__MACOSX") and not os.path.basename(n).startswith("._")]
-            todo = [n for n in names if not os.path.exists(os.path.join(dest, n))]
-            if todo:
-                rep.log(f"   압축 해제: {os.path.basename(p)}")
-                for n in todo:
-                    z.extract(n, dest)
-        shps += [f for f in glob.glob(os.path.join(dest, "**", "*.shp"), recursive=True)]
-    return shps
-
-
-def _encoding(shp):
-    cst = os.path.splitext(shp)[0] + ".cst"
-    if os.path.exists(cst):
-        e = open(cst, encoding="ascii", errors="ignore").read().strip().lower()
-        if e in ("euc-kr", "cp949", "ks_c_5601-1987"):
-            return "cp949"
-        if e:
-            return e
-    return "cp949"
-
-
-def _transformer(shp):
-    prj = os.path.splitext(shp)[0] + ".prj"
-    if os.path.exists(prj):
-        try:
-            c = CRS.from_wkt(open(prj, encoding="utf-8", errors="ignore").read())
-            if c.to_epsg() == 5186:
-                return None
-            return Transformer.from_crs(c, 5186, always_xy=True)
-        except Exception:
-            pass
-    return None
 
 
 def gis_height(h, f, default):
@@ -76,54 +31,22 @@ def build_buildings(s, osm, terrain, rep: Reporter, out_dir):
     gb = (exmin + cx, eymin + cy, exmax + cx, eymax + cy)   # 전역 TM 범위
     polys, hts, dflt = [], [], []
 
-    # ---------- 1) 브이월드 GIS 건물 ----------
-    shps = _extract_shps(s.building_zips, s.cache_dir, rep)
-    if not shps:
-        raise RuntimeError("건물 파일(.shp)을 찾지 못했습니다.")
-    for si, shp in enumerate(shps):
-        enc = _encoding(shp)
-        tr = _transformer(shp)
-        r = shapefile.Reader(shp, encoding=enc, encodingErrors="replace")
-        names = [f[0] for f in r.fields[1:]]
-        ih = names.index("A16") if "A16" in names else None
-        iff = names.index("A26") if "A26" in names else None
-        if ih is None and iff is None:
-            rep.log(f"   ⚠ {os.path.basename(shp)}: 높이/층수 필드(A16/A26)가 없어 기본 높이를 씁니다")
-        N = len(r)
-        rep.log(f"   {os.path.basename(shp)}: {N:,}동 검사")
-        inb = 0
-        for i, sh in enumerate(r.iterShapes()):
-            if i % 50000 == 0:
-                rep.progress(0.45 * (si + i / max(N, 1)) / len(shps))
-            if not sh.points:
-                continue
-            bx = sh.bbox
-            if tr is None and (bx[2] < gb[0] or bx[0] > gb[2] or bx[3] < gb[1] or bx[1] > gb[3]):
-                continue
-            pts = np.asarray(sh.points, float)
-            if tr is not None:
-                pts = np.c_[tr.transform(pts[:, 0], pts[:, 1])]
-                if pts[:, 0].max() < gb[0] or pts[:, 0].min() > gb[2] or pts[:, 1].max() < gb[1] or pts[:, 1].min() > gb[3]:
-                    continue
-            rec = r.record(i)
-            hgt, isd = gis_height(rec[ih] if ih is not None else 0, rec[iff] if iff is not None else 0, s.default_height)
-            parts = list(sh.parts) + [len(pts)]
-            for p in range(len(parts) - 1):
-                rr = pts[parts[p]:parts[p + 1]]
-                if len(rr) < 4 or ring_area(rr) > 0:      # shapefile 은 외곽=시계방향, 구멍=반시계
-                    continue
-                pg = Polygon(rr - [cx, cy])
-                if not pg.is_valid:
-                    pg = pg.buffer(0)
-                if pg.is_empty or pg.area < s.min_building_area:
-                    continue
-                if pg.geom_type != "Polygon":
-                    pg = max(pg.geoms, key=lambda g: g.area)
-                polys.append(pg)
-                hts.append(hgt)
-                dflt.append(isd)
-                inb += 1
-        rep.log(f"   → 범위 안 {inb:,}동")
+    # ---------- 1) 브이월드 GIS 건물 (라이브러리 인덱스) ----------
+    from . import library
+    rings = library.query(s.building_lib, gb, rep)
+    for k, (rr, h0) in enumerate(rings):
+        if k % 50000 == 0:
+            rep.progress(0.45 * k / max(len(rings), 1))
+        pg = Polygon(rr - [cx, cy])
+        if not pg.is_valid:
+            pg = pg.buffer(0)
+        if pg.is_empty or pg.area < s.min_building_area:
+            continue
+        if pg.geom_type != "Polygon":
+            pg = max(pg.geoms, key=lambda g: g.area)
+        polys.append(pg)
+        hts.append(h0 if h0 >= 0 else s.default_height)
+        dflt.append(h0 < 0)
     hts = np.array(hts, float)
     dflt = np.array(dflt, bool)
     rep.log(f"   GIS 건물 {len(polys):,} (높이 정보 없음 {dflt.sum():,})")

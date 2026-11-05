@@ -80,3 +80,14 @@ def run_blender(blender, data_dir, out_blend, rep: Reporter, preview=None, cance
     if p.returncode != 0 or not os.path.exists(out_blend):
         raise RuntimeError("Blender 실행 실패:\n" + "\n".join(tail[-12:]))
     rep.progress(1.0)
+
+
+def run_camera_update(blender, data_dir, blend, cam_json, rep: Reporter):
+    script = os.path.join(data_dir, "blender_scene.py")
+    shutil.copyfile(scene_script_path(), script)
+    cmd = [blender, "-b", blend, "--python", script, "--", "--data", data_dir, "--camera", cam_json]
+    p = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                       creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0))
+    if "SAVED" not in p.stdout:
+        raise RuntimeError("카메라 변경 실패:\n" + "\n".join((p.stdout + p.stderr).splitlines()[-12:]))
+    rep.log("   카메라를 추가하고 활성 카메라로 지정했습니다 (기존 카메라는 그대로 남아 있음)")
