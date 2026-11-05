@@ -67,6 +67,7 @@ def material(name, color, rough=0.85):
 
 
 def ground_material(name, img_path, cfg):
+    """지면 텍스처 RGBA: R=녹지, G=물, B=주요 도로, A=이면도로"""
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     nt = m.node_tree
@@ -76,32 +77,57 @@ def ground_material(name, img_path, cfg):
     tex = nt.nodes.new("ShaderNodeTexImage")
     img = bpy.data.images.load(img_path, check_existing=True)
     img.colorspace_settings.name = "Non-Color"
+    try:
+        img.alpha_mode = "CHANNEL_PACKED"
+    except Exception:
+        pass
     tex.image = img
     tex.extension = "EXTEND"
+    tex.interpolation = "Linear"
     sep = nt.nodes.new("ShaderNodeSeparateRGB") if hasattr(bpy.types, "ShaderNodeSeparateRGB") else nt.nodes.new("ShaderNodeSeparateColor")
-    mg = nt.nodes.new("ShaderNodeMixRGB")
-    mg.label = "녹지"
-    mg.inputs[1].default_value = rgba(cfg["col_ground"])
-    mg.inputs[2].default_value = rgba(cfg["col_green"])
-    mw = nt.nodes.new("ShaderNodeMixRGB")
-    mw.label = "물"
-    mw.inputs[2].default_value = rgba(cfg["col_water"])
+    L = nt.links
+    L.new(tex.outputs["Color"], sep.inputs[0])
+
+    def sharp(sock):
+        """부드러운 가장자리 값을 0.3~0.7 구간으로 좁혀 경계를 또렷하게 (해상도 이상의 선명도)"""
+        mr_ = nt.nodes.new("ShaderNodeMapRange")
+        mr_.inputs[1].default_value = 0.3
+        mr_.inputs[2].default_value = 0.7
+        mr_.clamp = True
+        L.new(sock, mr_.inputs[0])
+        return mr_.outputs[0]
+
+    def mix(label, a_socket, color, fac):
+        mx = nt.nodes.new("ShaderNodeMixRGB")
+        mx.label = label
+        mx.name = label
+        if a_socket is None:
+            mx.inputs[1].default_value = rgba(cfg["col_ground"])
+        else:
+            L.new(a_socket, mx.inputs[1])
+        mx.inputs[2].default_value = rgba(color)
+        if fac is None:
+            mx.inputs["Fac"].default_value = 0.0
+        else:
+            L.new(sharp(fac), mx.inputs["Fac"])
+        return mx
+
+    mg = mix("녹지", None, cfg["col_green"], sep.outputs[0])
+    m2 = mix("이면도로", mg.outputs["Color"], cfg["col_road"],
+             tex.outputs["Alpha"] if cfg.get("minor_roads", True) else None)
+    m1 = mix("도로", m2.outputs["Color"], cfg["col_road"], sep.outputs[2])
+    mw = mix("물", m1.outputs["Color"], cfg["col_water"], sep.outputs[1])
     rough = nt.nodes.new("ShaderNodeMath")
     rough.operation = "MULTIPLY_ADD"
     rough.inputs[1].default_value = -0.65
     rough.inputs[2].default_value = 0.9
-    L = nt.links
-    L.new(tex.outputs["Color"], sep.inputs[0])
-    L.new(sep.outputs[0], mg.inputs["Fac"])
-    L.new(mg.outputs["Color"], mw.inputs[1])
-    L.new(sep.outputs[1], mw.inputs["Fac"])
     L.new(sep.outputs[1], rough.inputs[0])
     L.new(mw.outputs["Color"], bsdf.inputs["Base Color"])
     L.new(rough.outputs["Value"], bsdf.inputs["Roughness"])
     set_spec(bsdf, 0.25)
     L.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
-    for i, n in enumerate([tex, sep, mg, mw, bsdf, out]):
-        n.location = (i * 250 - 600, 0)
+    for i, n in enumerate([tex, sep, mg, m2, m1, mw, bsdf, out]):
+        n.location = (i * 230 - 800, 0)
     return m
 
 

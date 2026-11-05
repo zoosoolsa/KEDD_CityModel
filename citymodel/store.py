@@ -3,7 +3,7 @@
 작업폴더/
   store.json                     전체 설정 (타일 크기, 지형 과장, 버전)
   tiles/<ix>_<iy>/               4km 타일 (EPSG:5186, 남서 모서리 = ix*T, iy*T)
-      terrain.npz  landcover.png  bld.npz  rd_major.npz  rd_minor.npz  br.npz  meta.json
+      terrain.npz  landcover.png(R녹지 G물 B도로 A이면도로)  bld.npz  br.npz  meta.json
   projects/<이름>/
       <이름>.blend  project.json (타일 목록·버전, 카메라 목록, 원점)
 """
@@ -19,7 +19,7 @@ from .util import MeshAcc, Terrain, Reporter, to_tm, to_ll
 
 Image.MAX_IMAGE_PIXELS = None
 TILE = 4000.0
-TILE_VERSION = 3          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
+TILE_VERSION = 4          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
 KINDS = ("bld", "rd_major", "rd_minor", "br")
 
 
@@ -240,8 +240,8 @@ def build_tiles(store: Store, keys, s, rep: Reporter, sources_for, cancel=lambda
         rep.set_stage(*_sub(rep, gi, len(groups), 0.15, 0.35), f"{tag} OpenStreetMap")
         osm = osmdata.get_osm(ss, rep)
 
-        rep.set_stage(*_sub(rep, gi, len(groups), 0.35, 0.45), f"{tag} 녹지·물 텍스처")
-        img, lres = landcover.build_landcover(ss, osm, terrain, rep, None)
+        rep.set_stage(*_sub(rep, gi, len(groups), 0.35, 0.40), f"{tag} 지면 텍스처 준비")
+        lcs = landcover.LandcoverSource(ss, osm, rep)
 
         sink = TileSink(comp, origin)
         rep.set_stage(*_sub(rep, gi, len(groups), 0.45, 0.80), f"{tag} 건물")
@@ -249,9 +249,9 @@ def build_tiles(store: Store, keys, s, rep: Reporter, sources_for, cancel=lambda
         rep.set_stage(*_sub(rep, gi, len(groups), 0.80, 0.95), f"{tag} 도로·다리")
         roads.build_roads(ss, osm, terrain, rep, sink)
 
-        rep.set_stage(*_sub(rep, gi, len(groups), 0.95, 1.00), f"{tag} 타일 저장")
+        rep.set_stage(*_sub(rep, gi, len(groups), 0.95, 1.00), f"{tag} 지면 텍스처·타일 저장")
         sink.save(store)
-        _save_terrain_tiles(store, comp, terrain, img, lres)
+        _save_terrain_tiles(store, comp, terrain, lcs, ss.lc_res, rep)
         for k in comp:
             json.dump(dict(sources=sources_for(k), exag=store.exag, res=res, tile=T,
                            built=dt.datetime.now().isoformat(timespec="minutes")),
@@ -268,15 +268,14 @@ def _sub(rep, gi, n, a, b):
     return lo + span * (gi + a), lo + span * (gi + b)
 
 
-def _save_terrain_tiles(store, comp, terrain, img, lres):
+def _save_terrain_tiles(store, comp, terrain, lcs, lres, rep=None):
     T = TILE
     res = terrain.res
     cx, cy = terrain.origin
     gx0 = terrain.x0 + cx            # 영역 꼭짓점 (0,0) 의 전역 좌표
     gy0 = terrain.y0 + cy
     n = int(round(T / res))
-    pn = int(round(T / lres))
-    for k in comp:
+    for i, k in enumerate(comp):
         tx0, ty1 = k[0] * T, (k[1] + 1) * T
         c0 = int(round((tx0 - gx0) / res))
         r0 = int(round((gy0 - ty1) / res))
@@ -286,9 +285,10 @@ def _save_terrain_tiles(store, comp, terrain, img, lres):
         d = store.tile_dir(k)
         os.makedirs(d, exist_ok=True)
         np.savez_compressed(os.path.join(d, "terrain.npz"), z=z[1:-1, 1:-1], zpad=z, water=w, res=res)
-        px0 = int(round((tx0 - gx0) / lres))
-        py0 = int(round((gy0 - ty1) / lres))
-        Image.fromarray(img[py0:py0 + pn, px0:px0 + pn]).save(os.path.join(d, "landcover.png"), optimize=True)
+        img = lcs.render_tile((tx0, ty1 - T, tx0 + T, ty1), terrain, lres)
+        Image.fromarray(img, "RGBA").save(os.path.join(d, "landcover.png"), compress_level=6)
+        if rep:
+            rep.progress((i + 1) / len(comp))
 
 
 # ------------------------------------------------------------------ 프로젝트

@@ -1,4 +1,4 @@
-"""도로(지면 위 얇은 판) + 다리(조각 병합, 양끝 도로 높이에 맞춘 경사 상판, 교각)."""
+"""도로는 지면 텍스처(landcover.py)에 칠하고, 여기서는 다리(조각 병합, 양끝 도로 높이에 맞춘 경사 상판, 교각)."""
 import os
 import numpy as np
 import shapely
@@ -36,27 +36,15 @@ def build_roads(s, osm, terrain, rep: Reporter, sink):
     ways = osm["ways"]
     for k, w in enumerate(ways):
         if k % 5000 == 0:
-            rep.progress(0.6 * k / max(len(ways), 1))
+            rep.progress(0.3 * k / max(len(ways), 1))
+        if not w['bridge']:
+            continue                 # 일반 도로는 지면 텍스처(landcover.py)에 칠함
         lon, lat = np.array(w['pts']).T
         X, Y = to_tm(lon, lat)
         p = np.c_[X - cx, Y - cy]
-        if len(p) < 2:
-            continue
-        if w['bridge']:
+        if len(p) >= 2:
             blines.append(LineString(p))
             bw.append(_width(w))
-            continue
-        if w['hw'] not in MAJOR and not s.include_minor_roads:
-            continue
-        p = densify(p, 10.0)
-        if len(p) < 2:
-            continue
-        L, R = offset_sides(p, _width(w))
-        n = len(p)
-        V = np.vstack([np.c_[L, terrain.ground(*L.T) + off], np.c_[R, terrain.ground(*R.T) + off]])
-        acc = sink.get("rd_major" if w['hw'] in MAJOR else "rd_minor", *p.mean(0))
-        if acc is not None:
-            acc.add(V, [[n + i, n + i + 1, i + 1, i] for i in range(n - 1)])
 
     # ---- 다리 ----
     if blines:
@@ -87,11 +75,11 @@ def build_roads(s, osm, terrain, rep: Reporter, sink):
             elif S > 300:
                 C = np.full(n, 8.0)
             else:
-                C = np.full(n, off)
+                C = np.full(n, max(off, 1.2))
             tgt = g + C
             kk = 6
             tgt = nd.gaussian_filter1d(nd.maximum_filter1d(tgt, 2 * kk + 1, mode="nearest"), kk, mode="nearest")
-            Rr = min(150.0, S / 3.0) if C.max() > off else max(S / 2.0, 1.0)
+            Rr = min(150.0, S / 3.0) if C.max() > 1.2 else max(S / 2.0, 1.0)
             ramp = _smoothstep(np.minimum(sd, S - sd) / Rr)
             zt = base * (1 - ramp) + np.maximum(base, tgt) * ramp
             zt = np.maximum(zt, g + off)

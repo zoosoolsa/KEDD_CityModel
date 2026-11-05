@@ -102,6 +102,12 @@ def build_terrain(s, rep: Reporter, out_path, tm_bounds=None):
     k = int(round(210 / res)) | 1
     ground = nd.grey_opening(out, size=(k, k))
     ground = nd.gaussian_filter(ground, 1.0)
+    # 시가지 평탄화: 완만한 곳(경사 < 4%)은 넓게 다듬어 잔 요철 제거, 산지(경사 > 12%)는 그대로
+    smooth = nd.gaussian_filter(ground, 75.0 / res)
+    gy_, gx_ = np.gradient(smooth, res)
+    slope = nd.gaussian_filter(np.hypot(gx_, gy_), 2.0)
+    wgt = np.clip((slope - 0.04) / 0.08, 0, 1)
+    ground = smooth * (1 - wgt) + ground * wgt
     wl = float(np.median(out[water])) if water.any() else 0.0
     ground[water] = wl - 2.0
 

@@ -50,12 +50,12 @@ class Settings:
     dem_res: float = 25.0        # 지형 격자 (m, 타일 4km 의 약수)
     osm_max_age_days: int = 90   # OSM 자동 갱신 주기 (일)
     api_heights: bool = True     # 브이월드 API(도로명주소건물 층수)로 높이 보완
-    lc_res: float = 5.0          # 녹지/물 텍스처 해상도 (m)
+    lc_res: float = 2.0          # 지면 텍스처(녹지·물·도로) 해상도 (m)
     min_building_area: float = 15.0
     default_height: float = 7.0
     use_osm_buildings: bool = True
     include_minor_roads: bool = True
-    road_offset: float = 1.2
+    road_offset: float = 0.15   # 다리 양끝이 지면에 닿는 높이
     landmarks: list = field(default_factory=lambda: [dict(x) for x in DEFAULT_LANDMARKS])
     # 렌더/색
     col_building: tuple = (0.88, 0.88, 0.88)
