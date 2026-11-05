@@ -79,6 +79,9 @@ def run(s: Settings, rep: Reporter, cancel=lambda: False):
     previews.append(landcover.preview_png(lc, os.path.join(s.project_dir, "preview_landcover.png"), s))
 
     rep.set_stage(0.45, 0.72, "4/6 건물 (GIS건물통합정보 + OSM 보완)")
+    miss = [r["name"] for r in library.overview(s.building_lib, s.bbox)[0] if r["need"] and r["state"] == "없음"]
+    if miss:
+        rep.log(f"   ⚠ 범위에 걸치지만 건물 데이터가 없는 시도: {', '.join(miss)} (그 부분은 OSM 건물만 들어갑니다)")
     if s.building_zips:
         got = library.import_files(s.building_lib, s.building_zips)
         if got:

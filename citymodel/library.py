@@ -21,13 +21,30 @@ from pyproj import CRS, Transformer
 from .util import Reporter, ring_area
 
 SIDO = {
-    "11": "서울특별시", "26": "부산광역시", "27": "대구광역시", "28": "인천광역시", "29": "광주광역시",
+    "11": "서울특별시", "12": "전남광주통합특별시",
+    "26": "부산광역시", "27": "대구광역시", "28": "인천광역시", "29": "광주광역시",
     "30": "대전광역시", "31": "울산광역시", "36": "세종특별자치시", "41": "경기도", "42": "강원도",
     "43": "충청북도", "44": "충청남도", "45": "전라북도", "46": "전라남도", "47": "경상북도",
     "48": "경상남도", "50": "제주특별자치도", "51": "강원특별자치도", "52": "전북특별자치도",
 }
 FNAME = re.compile(r"AL_D010_(\d{2})_(\d{8})\.zip$", re.I)
-VWORLD_PAGE = "https://www.data.go.kr/data/15083092/fileData.do"   # 브이월드 GIS건물통합정보 다운로드로 연결
+VWORLD_PAGE = "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18"   # GIS건물통합정보 다운로드 페이지
+DS_ID = "20171128DS00010"
+CATALOG_URL = ("https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18&fileGbnCd=AL&formatSelect=SHP"
+               "&datPageSize=100&datPageIndex=1&startDate={start}&endDate={end}&sidoCd=&sigunguCd=&dsNm=")
+DOWNLOAD_URL = "https://www.vworld.kr/dtmk/downloadResourceFile.do?ds_id=" + DS_ID + "&fileNo={no}"
+# 현재 제공 시도 (2026, 광주·전남 통합) + 대략 범위 (경도min, 위도min, 경도max, 위도max)
+CURRENT = [
+    ("11", (126.76, 37.41, 127.19, 37.72)), ("26", (128.76, 34.88, 129.31, 35.39)),
+    ("27", (128.35, 35.60, 128.95, 36.33)), ("28", (124.60, 37.00, 126.80, 37.98)),
+    ("30", (127.24, 36.18, 127.56, 36.50)), ("31", (128.96, 35.32, 129.47, 35.73)),
+    ("36", (127.00, 36.40, 127.40, 36.74)), ("41", (126.37, 36.89, 127.85, 38.29)),
+    ("51", [(127.08, 37.85, 129.37, 38.62), (127.55, 37.02, 129.37, 37.85)]), ("43", (127.27, 36.00, 128.66, 37.26)),
+    ("44", (125.97, 35.97, 127.66, 37.07)), ("52", (126.00, 35.28, 127.90, 36.16)),
+    ("12", (125.00, 33.90, 127.90, 35.50)), ("47", (127.80, 35.57, 131.90, 37.56)),
+    ("48", (127.57, 34.47, 129.22, 35.91)), ("50", (126.10, 33.10, 127.00, 33.60)),
+]
+NAME2CODE = {v: k for k, v in SIDO.items()}
 STALE_DAYS = 90
 IDX_VERSION = 2
 
@@ -238,3 +255,81 @@ def query(lib, gbbox, rep: Reporter):
         used.append(f"{meta['name']}({meta['date']}) {len(sel):,}")
     rep.log("   사용한 건물 데이터: " + (", ".join(used) if used else "없음"))
     return res
+
+
+# ---------------------------------------------------------------- 브이월드 목록 (로그인 불필요한 공개 목록)
+_ITEM = re.compile(r'sigunguNm1">\s*([^<]+?)\s*</span>.*?기준일<em[^>]*>(\d{4}-\d{2}-\d{2})</em>.*?'
+                   r"listFnc\.download\('[^']+',\s*'(\d+)',\s*'(\d+)'\)", re.S)
+
+
+def parse_catalog(html):
+    """목록 HTML → {code: {name, date(YYYYMMDD), fileNo, size_mb}} (시도별 최신 전체데이터)"""
+    out = {}
+    for blk in html.split("<li><!--")[1:]:
+        if "전체데이터" not in blk or "GIS건물통합정보" not in blk:
+            continue
+        m = _ITEM.search(blk)
+        if not m:
+            continue
+        name, date, no, kb = m.group(1).strip(), m.group(2).replace("-", ""), m.group(3), int(m.group(4))
+        code = NAME2CODE.get(name)
+        if not code:
+            continue
+        if code not in out or date > out[code]["date"]:
+            out[code] = dict(name=name, date=date, fileNo=no, size_mb=round(kb / 1024))
+    return out
+
+
+def fetch_catalog(lib, timeout=20):
+    """브이월드 공개 목록을 읽어 시도별 최신 전체데이터 정보를 저장/반환"""
+    import urllib.request
+    import ssl
+    today = dt.date.today()
+    url = CATALOG_URL.format(start=(today - dt.timedelta(days=400)).isoformat(), end=today.isoformat())
+    ctx = ssl.create_default_context()
+    try:
+        import certifi
+        ctx = ssl.create_default_context(cafile=certifi.where())
+    except Exception:
+        pass
+    req = urllib.request.Request(url, headers={"User-Agent": "Mozilla/5.0 KEDD-CityModel"})
+    with urllib.request.urlopen(req, timeout=timeout, context=ctx) as r:
+        html = r.read().decode("utf-8", "replace")
+    cat = parse_catalog(html)
+    if not cat:
+        raise RuntimeError("브이월드 목록에서 GIS건물통합정보 항목을 찾지 못했습니다 (페이지 구조가 바뀌었을 수 있음)")
+    os.makedirs(lib, exist_ok=True)
+    json.dump(dict(fetched=dt.datetime.now().isoformat(timespec="minutes"), items=cat),
+              open(os.path.join(lib, "_catalog.json"), "w", encoding="utf-8"), ensure_ascii=False, indent=1)
+    return cat
+
+
+def load_catalog(lib):
+    p = os.path.join(lib, "_catalog.json")
+    if os.path.exists(p):
+        d = json.load(open(p, encoding="utf-8"))
+        return d.get("items", {}), d.get("fetched")
+    return {}, None
+
+
+def overview(lib, bbox=None):
+    """GUI 목록: 현재 16개 시도 × (브이월드 최신, 내 폴더, 상태, 범위 필요 여부)"""
+    cat, fetched = load_catalog(lib)
+    have = scan(lib) if os.path.isdir(lib) else {}
+    rows = []
+    for code, bb in CURRENT:
+        c = cat.get(code)
+        h = have.get(code)
+        boxes = bb if isinstance(bb, list) else [bb]
+        need = bool(bbox) and any(not (b[2] < bbox[0] or b[0] > bbox[2] or b[3] < bbox[1] or b[1] > bbox[3]) for b in boxes)
+        fmt = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}" if d else "-"
+        if h and (not c or h["date"] >= c["date"]):
+            state = "보유"
+        elif h:
+            state = "새 버전"
+        else:
+            state = "없음"
+        rows.append(dict(code=code, name=SIDO[code], latest=fmt(c["date"]) if c else "?", have=fmt(h["date"]) if h else "-",
+                         size=f"{c['size_mb']}MB" if c else "", state=state, need=need,
+                         url=DOWNLOAD_URL.format(no=c["fileNo"]) if c else VWORLD_PAGE))
+    return rows, fetched
