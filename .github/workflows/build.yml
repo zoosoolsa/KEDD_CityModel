@@ -1,8 +1,13 @@
 name: build
 on:
   push:
+    branches: [main]
     tags: ["v*"]
+    paths-ignore: ["README.md"]
   workflow_dispatch:
+
+permissions:
+  contents: write
 
 jobs:
   build:
@@ -12,9 +17,9 @@ jobs:
         include:
           - os: windows-latest
             name: windows-x64
-          - os: macos-14          # Apple Silicon
+          - os: macos-15          # Apple Silicon
             name: macos-arm64
-          - os: macos-13          # Intel Mac
+          - os: macos-15-intel    # Intel Mac
             name: macos-x64
     runs-on: ${{ matrix.os }}
     steps:
