@@ -29,10 +29,9 @@ def _smoothstep(x):
     return x * x * (3 - 2 * x)
 
 
-def build_roads(s, osm, terrain, rep: Reporter, out_dir):
+def build_roads(s, osm, terrain, rep: Reporter, sink):
     cx, cy = terrain.origin
     off = s.road_offset
-    maj, mnr, brg = MeshAcc(), MeshAcc(), MeshAcc()
     blines, bw = [], []
     ways = osm["ways"]
     for k, w in enumerate(ways):
@@ -55,7 +54,9 @@ def build_roads(s, osm, terrain, rep: Reporter, out_dir):
         L, R = offset_sides(p, _width(w))
         n = len(p)
         V = np.vstack([np.c_[L, terrain.ground(*L.T) + off], np.c_[R, terrain.ground(*R.T) + off]])
-        (maj if w['hw'] in MAJOR else mnr).add(V, [[n + i, n + i + 1, i + 1, i] for i in range(n - 1)])
+        acc = sink.get("rd_major" if w['hw'] in MAJOR else "rd_minor", *p.mean(0))
+        if acc is not None:
+            acc.add(V, [[n + i, n + i + 1, i + 1, i] for i in range(n - 1)])
 
     # ---- 다리 ----
     if blines:
@@ -70,6 +71,9 @@ def build_roads(s, osm, terrain, rep: Reporter, out_dir):
             wd = float(np.median([bw[k] for k in idx])) if len(idx) else 10.0
             p = densify(np.asarray(ml.coords)[:, :2], 10.0)
             if len(p) < 2:
+                continue
+            brg = sink.get("br", *p.mean(0))
+            if brg is None:
                 continue
             n = len(p)
             sd = np.r_[0, np.cumsum(np.hypot(*np.diff(p, axis=0).T))]
@@ -116,8 +120,4 @@ def build_roads(s, osm, terrain, rep: Reporter, out_dir):
                 q = [c - a - b, c + a - b, c + a + b, c - a + b]
                 brg.add([(*q[j], bot) for j in range(4)] + [(*q[j], top) for j in range(4)],
                         [[0, 1, 5, 4], [1, 2, 6, 5], [2, 3, 7, 6], [3, 0, 4, 7]])
-    a = maj.save(os.path.join(out_dir, "rd_major.npz"))
-    b = mnr.save(os.path.join(out_dir, "rd_minor.npz"))
-    c = brg.save(os.path.join(out_dir, "br_bridges.npz"))
-    rep.log(f"   도로 꼭짓점 {a + b:,}, 다리 {c:,}")
     rep.progress(1.0)

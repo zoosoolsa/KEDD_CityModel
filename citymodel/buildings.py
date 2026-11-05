@@ -1,5 +1,4 @@
 """건물: 브이월드 GIS건물통합정보 + OSM 보완 → 압출 메쉬 (지형 과장 반영된 절대 높이)."""
-import glob
 import os
 import numpy as np
 import shapefile
@@ -25,7 +24,8 @@ def gis_height(h, f, default):
     return default, True
 
 
-def build_buildings(s, osm, terrain, rep: Reporter, out_dir):
+def build_buildings(s, osm, terrain, rep: Reporter, sink):
+    """sink: store.TileSink — 건물 중심점이 속한 타일로 분배 (대상 타일 밖은 버림)"""
     cx, cy = terrain.origin
     exmin, eymin, exmax, eymax = terrain.extent
     gb = (exmin + cx, eymin + cy, exmax + cx, eymax + cy)   # 전역 TM 범위
@@ -47,6 +47,43 @@ def build_buildings(s, osm, terrain, rep: Reporter, out_dir):
         polys.append(pg)
         hts.append(h0 if h0 >= 0 else s.default_height)
         dflt.append(h0 < 0)
+    # ---------- 1b) 브이월드 API 도로명주소건물 (층수 보완 + GIS 에 없는 건물) ----------
+    if getattr(s, "api_heights", False):
+        from . import vworld_api
+        key = vworld_api.get_key()
+        if key:
+            import shapely as _sh
+            api = vworld_api.fetch_spbd(key, gb, os.path.join(s.cache_dir, "spbd"), rep)
+            tree0 = _sh.STRtree(polys) if polys else None
+            filled = added = 0
+            for fl, rr in api:
+                pg = Polygon(rr - [cx, cy])
+                if not pg.is_valid:
+                    pg = pg.buffer(0)
+                if pg.is_empty or pg.area < s.min_building_area:
+                    continue
+                if pg.geom_type != "Polygon":
+                    pg = max(pg.geoms, key=lambda g: g.area)
+                fh = fl * 3.3 + 1.5 if fl > 0 else None
+                cover = 0.0
+                if tree0 is not None:
+                    idx = tree0.query(pg, predicate="intersects")
+                    for k in idx:
+                        ia = polys[k].intersection(pg).area
+                        cover += ia
+                        if fh and dflt[k] and ia / polys[k].area > 0.5:
+                            hts[k] = fh
+                            dflt[k] = False
+                            filled += 1
+                    cover /= pg.area
+                if cover < 0.15:
+                    polys.append(pg)
+                    hts.append(fh or s.default_height)
+                    dflt.append(fh is None)
+                    added += 1
+            rep.log(f"   API 층수로 높이 보완 {filled:,}동, GIS 에 없는 건물 추가 {added:,}동")
+        else:
+            rep.log("   (브이월드 인증키가 없어 API 높이 보완은 건너뜀)")
     hts = np.array(hts, float)
     dflt = np.array(dflt, bool)
     rep.log(f"   GIS 건물 {len(polys):,} (높이 정보 없음 {dflt.sum():,})")
@@ -117,13 +154,16 @@ def build_buildings(s, osm, terrain, rep: Reporter, out_dir):
     allp = [allp[k] for k in keep]
     allh = allh[keep]
 
-    # ---------- 5) 메쉬 (타일 분할) ----------
-    NT = 4 if len(allp) > 200000 else (2 if len(allp) > 30000 else 1)
-    tiles = [MeshAcc() for _ in range(NT * NT)]
+    # ---------- 5) 메쉬 (타일로 분배) ----------
     n = len(allp)
+    cnt = 0
     for k, (pg, h) in enumerate(zip(allp, allh)):
         if k % 20000 == 0:
             rep.progress(0.75 + 0.22 * k / max(n, 1))
+        c = pg.centroid
+        acc = sink.get("bld", c.x, c.y)
+        if acc is None:
+            continue
         sp = pg.simplify(0.8, preserve_topology=True)
         if sp.is_empty or sp.geom_type != "Polygon":
             continue
@@ -134,24 +174,16 @@ def build_buildings(s, osm, terrain, rep: Reporter, out_dir):
             ring = ring[::-1]
         g = terrain.ground(ring[:, 0], ring[:, 1])
         gc = float(terrain.ground([ring[:, 0].mean()], [ring[:, 1].mean()])[0])
-        top = max(g.max(), gc) + h
-        bot = min(g.min(), gc) - 4
-        gx, gy = ring.mean(0)
-        ti = min(max(int((gx - exmin) / (exmax - exmin) * NT), 0), NT - 1) + \
-            NT * min(max(int((gy - eymin) / (eymax - eymin) * NT), 0), NT - 1)
-        tiles[ti].add_prism(ring, bot, top)
-    for f in glob.glob(os.path.join(out_dir, "bld_*.npz")):
-        os.remove(f)
-    tot = 0
-    for ti, acc in enumerate(tiles):
-        tot += acc.save(os.path.join(out_dir, f"bld_{ti:02d}.npz"))
-
-    # ---------- 6) 랜드마크 메쉬 ----------
-    acc = MeshAcc()
+        acc.add_prism(ring, min(g.min(), gc) - 4, max(g.max(), gc) + h)
+        cnt += 1
+    # ---------- 6) 랜드마크 ----------
+    nl = 0
     for lm in lms:
-        _taper(acc, terrain, lm)
-    acc.save(os.path.join(out_dir, "bld_landmarks.npz"))
-    rep.log(f"   건물 {len(allp):,}동 (꼭짓점 {tot:,}), 랜드마크 {len(lms)}개")
+        acc = sink.get("bld", lm["x"], lm["y"])
+        if acc is not None:
+            _taper(acc, terrain, lm)
+            nl += 1
+    rep.log(f"   건물 {cnt:,}동, 랜드마크 {nl}개")
     rep.progress(1.0)
 
 

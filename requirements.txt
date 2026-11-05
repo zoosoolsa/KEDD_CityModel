@@ -8,3 +8,4 @@ tifffile>=2023.1
 imagecodecs>=2023.1
 pillow>=10
 certifi
+keyring>=24

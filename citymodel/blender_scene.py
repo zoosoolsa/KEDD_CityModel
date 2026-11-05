@@ -1,44 +1,32 @@
-# Blender 안에서 실행되는 장면 생성 스크립트 (Blender 3.3 ~ 5.x)
-#   blender -b --factory-startup --python blender_scene.py -- --data <폴더> --out <파일.blend> [--preview <png>]
-# <폴더> 에는 terrain.npz, landcover.png, bld_*.npz, rd_*.npz, br_*.npz, scene.json 이 있어야 함
-import bpy, glob, os, sys, json, math
+# Blender 안에서 실행되는 장면 조립 스크립트 (Blender 3.3 ~ 5.x)
+#   새 장면:   blender -b --factory-startup --python blender_scene.py -- --scene scene.json --out 파일.blend [--preview png]
+#   카메라 추가: blender -b 파일.blend --python blender_scene.py -- --cameras cams.json
+import bpy, os, sys, json, math
 import numpy as np
 from mathutils import Vector
 
 
 def args():
     a = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
-    d = {}
-    for k, v in zip(a[::2], a[1::2]):
-        d[k.lstrip("-")] = v
-    return d
+    return {k.lstrip("-"): v for k, v in zip(a[::2], a[1::2])}
 
 
 A = args()
-DATA = A["data"]
-CFG = json.load(open(os.path.join(DATA, "scene.json"), encoding="utf-8"))
 
 
 def rgba(c):
     return tuple(c[:3]) + (1.0,)
 
 
-def clear_scene():
-    for ob in list(bpy.data.objects):
-        bpy.data.objects.remove(ob, do_unlink=True)
-    for m in list(bpy.data.meshes):
-        bpy.data.meshes.remove(m)
-
-
-def get_coll(name):
+def get_coll(name, parent=None):
     c = bpy.data.collections.get(name)
     if not c:
         c = bpy.data.collections.new(name)
-        bpy.context.scene.collection.children.link(c)
+        (parent or bpy.context.scene.collection).children.link(c)
     return c
 
 
-def make_mesh(name, v, loops, ptot, coll, smooth=False):
+def make_mesh(name, v, loops, ptot, coll, smooth=False, loc=(0, 0, 0)):
     me = bpy.data.meshes.new(name)
     me.vertices.add(len(v))
     me.vertices.foreach_set("co", np.ascontiguousarray(v, dtype=np.float32).ravel())
@@ -55,6 +43,7 @@ def make_mesh(name, v, loops, ptot, coll, smooth=False):
     me.update(calc_edges=True)
     me.polygons.foreach_set("use_smooth", np.full(len(ptot), smooth, bool))
     ob = bpy.data.objects.new(name, me)
+    ob.location = loc
     coll.objects.link(ob)
     return ob
 
@@ -77,25 +66,26 @@ def material(name, color, rough=0.85):
     return m
 
 
-def ground_material():
-    m = bpy.data.materials.new("Ground")
+def ground_material(name, img_path, cfg):
+    m = bpy.data.materials.new(name)
     m.use_nodes = True
     nt = m.node_tree
     nt.nodes.clear()
     out = nt.nodes.new("ShaderNodeOutputMaterial")
     bsdf = nt.nodes.new("ShaderNodeBsdfPrincipled")
     tex = nt.nodes.new("ShaderNodeTexImage")
-    img = bpy.data.images.load(os.path.join(DATA, "landcover.png"), check_existing=True)
+    img = bpy.data.images.load(img_path, check_existing=True)
     img.colorspace_settings.name = "Non-Color"
     tex.image = img
+    tex.extension = "EXTEND"
     sep = nt.nodes.new("ShaderNodeSeparateRGB") if hasattr(bpy.types, "ShaderNodeSeparateRGB") else nt.nodes.new("ShaderNodeSeparateColor")
     mg = nt.nodes.new("ShaderNodeMixRGB")
     mg.label = "녹지"
-    mg.inputs[1].default_value = rgba(CFG["col_ground"])
-    mg.inputs[2].default_value = rgba(CFG["col_green"])
+    mg.inputs[1].default_value = rgba(cfg["col_ground"])
+    mg.inputs[2].default_value = rgba(cfg["col_green"])
     mw = nt.nodes.new("ShaderNodeMixRGB")
     mw.label = "물"
-    mw.inputs[2].default_value = rgba(CFG["col_water"])
+    mw.inputs[2].default_value = rgba(cfg["col_water"])
     rough = nt.nodes.new("ShaderNodeMath")
     rough.operation = "MULTIPLY_ADD"
     rough.inputs[1].default_value = -0.65
@@ -115,9 +105,61 @@ def ground_material():
     return m
 
 
-def setup_ao(sc, world_col, world_str):
+def terrain_tile(name, d, loc, exag, cfg, coll):
+    t = np.load(os.path.join(d, "terrain.npz"))
+    z = t["z"].astype(np.float32)
+    zp = t["zpad"].astype(np.float32)
+    res = float(t["res"])
+    H, W = z.shape
+    T = (W - 1) * res
+    xs = np.arange(W) * res
+    ys = T - np.arange(H) * res
+    X, Y = np.meshgrid(xs, ys)
+    V = np.c_[X.ravel(), Y.ravel(), z.ravel() * exag]
+    i = (np.arange(H - 1)[:, None] * W + np.arange(W - 1)[None, :]).ravel()
+    loops = np.c_[i, i + W, i + W + 1, i + 1].ravel()
+    ob = make_mesh(name, V, loops, np.full(len(i), 4, np.int32), coll, smooth=True, loc=loc)
+    me = ob.data
+    uvl = me.uv_layers.new(name="UVMap")
+    li = np.zeros(len(me.loops), np.int32)
+    me.loops.foreach_get("vertex_index", li)
+    uvl.data.foreach_set("uv", np.c_[V[li, 0] / T, V[li, 1] / T].astype(np.float32).ravel())
+    # 이웃 타일과 이음매 없이 이어지도록 여유 칸(zpad)으로 법선 계산
+    dzdx = (zp[1:-1, 2:] - zp[1:-1, :-2]) * exag / (2 * res)
+    dzdy = (zp[:-2, 1:-1] - zp[2:, 1:-1]) * exag / (2 * res)
+    n = np.dstack([-dzdx, -dzdy, np.ones_like(dzdx)]).reshape(-1, 3)
+    n /= np.linalg.norm(n, axis=1)[:, None]
+    try:
+        if hasattr(me, "use_auto_smooth"):
+            me.use_auto_smooth = True
+        me.normals_split_custom_set_from_vertices([tuple(v) for v in n])
+    except Exception as e:
+        print("normals skip", e)
+    me.materials.append(ground_material(name + "_mat", os.path.join(d, "landcover.png"), cfg))
+    return ob
+
+
+def add_camera(sc, cam, name, cfg):
+    cd = bpy.data.cameras.new(name)
+    cd.sensor_fit = "VERTICAL"
+    cd.angle_y = math.radians(cam.get("fov", 35.0))
+    cd.clip_start = 10
+    cd.clip_end = 300000
+    ob = bpy.data.objects.new(name, cd)
+    get_coll("Cameras").objects.link(ob)
+    ob.location = Vector(cam["location"])
+    ob.rotation_euler = cam["rotation"]
+    sc.camera = ob
+    asp = cam.get("aspect")
+    if asp:
+        sc.render.resolution_x = cfg.get("render_w", 3000)
+        sc.render.resolution_y = int(round(sc.render.resolution_x / asp))
+    return ob
+
+
+def setup_ao(sc, cfg, world_col, world_str):
     bpy.context.view_layer.use_pass_ambient_occlusion = True
-    sc.world.light_settings.distance = CFG["ao_distance"]
+    sc.world.light_settings.distance = cfg["ao_distance"]
     sc.render.use_compositing = True
     sc.render.film_transparent = True
     sky = tuple(c * world_str for c in world_col) + (1.0,)
@@ -136,7 +178,7 @@ def setup_ao(sc, world_col, world_str):
     fac = N.new("ShaderNodeMath" if new5 else "CompositorNodeMath")
     fac.operation = "MULTIPLY"
     fac.label = "AO 강도"
-    fac.inputs[1].default_value = CFG["ao_strength"]
+    fac.inputs[1].default_value = cfg["ao_strength"]
     Lk.new(rl.outputs["Alpha"], fac.inputs[0])
     if new5:
         mix = N.new("ShaderNodeMix")
@@ -170,75 +212,39 @@ def setup_ao(sc, world_col, world_str):
         Lk.new(ov.outputs[0], comp.inputs[0])
 
 
-def add_camera(sc, cam_cfg, name):
-    cd = bpy.data.cameras.new(name)
-    cd.sensor_fit = "VERTICAL"
-    cd.angle_y = math.radians(cam_cfg.get("fov", 35.0))
-    cd.clip_start = 10
-    cd.clip_end = 300000
-    cam = bpy.data.objects.new(name, cd)
-    sc.collection.objects.link(cam)
-    cam.location = Vector(cam_cfg["location"])
-    cam.rotation_euler = cam_cfg["rotation"]
-    sc.camera = cam
-    return cam
-
-
-def build():
-    clear_scene()
+def build(cfg):
+    for ob in list(bpy.data.objects):
+        bpy.data.objects.remove(ob, do_unlink=True)
+    for m in list(bpy.data.meshes):
+        bpy.data.meshes.remove(m)
     sc = bpy.context.scene
-    t = np.load(os.path.join(DATA, "terrain.npz"))
-    z = t["z"].astype(np.float32)
-    res = float(t["res"])
-    x0 = float(t["x0"])
-    y0 = float(t["y0"])
-    H, W = z.shape
-    E = CFG["exag"]
+    E = cfg["exag"]
+    ox, oy = cfg["origin"]
+    mb = material("Clay_Building", cfg["col_building"])
+    mr = material("Road", cfg["col_road"], 0.7)
+    c_ter = get_coll("Terrain")
+    c_bld = get_coll("Buildings")
+    c_rd = get_coll("Roads_Bridges")
+    for ti, t in enumerate(cfg["tiles"]):
+        d, tx, ty = t["dir"], t["x0"], t["y0"]
+        nm = os.path.basename(d)
+        loc = (tx - ox, ty - oy, 0.0)
+        terrain_tile("T_" + nm, d, loc, E, cfg, c_ter)
+        for kind, coll in (("bld", c_bld), ("rd_major", c_rd), ("rd_minor", c_rd), ("br", c_rd)):
+            p = os.path.join(d, kind + ".npz")
+            if not os.path.exists(p) or (kind == "rd_minor" and not cfg.get("minor_roads", True)):
+                continue
+            z = np.load(p)
+            ob = make_mesh(f"{kind}_{nm}", z["v"], z["loops"], z["ptot"], coll, loc=loc)
+            if kind == "br":
+                ob.data.materials.append(mb)
+                ob.data.materials.append(mr)
+                if "mat" in z.files:
+                    ob.data.polygons.foreach_set("material_index", z["mat"].astype(np.int32))
+            else:
+                ob.data.materials.append(mr if kind.startswith("rd") else mb)
+        print(f"loaded tile {ti + 1}/{len(cfg['tiles'])} {nm}", flush=True)
 
-    # 지형
-    xs = x0 + (np.arange(W) + 0.5) * res
-    ys = y0 - (np.arange(H) + 0.5) * res
-    X, Y = np.meshgrid(xs, ys)
-    V = np.c_[X.ravel(), Y.ravel(), z.ravel() * E]
-    i = (np.arange(H - 1)[:, None] * W + np.arange(W - 1)[None, :]).ravel()
-    loops = np.c_[i, i + W, i + W + 1, i + 1].ravel()
-    ter = make_mesh("Terrain", V, loops, np.full(len(i), 4, np.int32), get_coll("Terrain"), smooth=True)
-    me = ter.data
-    uvl = me.uv_layers.new(name="UVMap")
-    li = np.zeros(len(me.loops), np.int32)
-    me.loops.foreach_get("vertex_index", li)
-    U = (V[:, 0] - x0) / (W * res)
-    Vv = (V[:, 1] - (y0 - H * res)) / (H * res)
-    uvl.data.foreach_set("uv", np.c_[U[li], Vv[li]].astype(np.float32).ravel())
-    me.materials.append(ground_material())
-    print("terrain", W, H, flush=True)
-
-    mb = material("Clay_Building", CFG["col_building"])
-    mr = material("Road", CFG["col_road"], 0.7)
-    rc = get_coll("Roads_Bridges")
-    for f in sorted(glob.glob(os.path.join(DATA, "rd_*.npz")) + glob.glob(os.path.join(DATA, "br_*.npz"))):
-        nm = os.path.basename(f)[:-4]
-        d = np.load(f)
-        ob = make_mesh(nm, d["v"], d["loops"], d["ptot"], rc)
-        if nm.startswith("br_"):
-            ob.data.materials.append(mb)
-            ob.data.materials.append(mr)
-            if "mat" in d.files:
-                ob.data.polygons.foreach_set("material_index", d["mat"].astype(np.int32))
-        else:
-            ob.data.materials.append(mr)
-        print("loaded", nm, len(d["v"]), flush=True)
-    bc = get_coll("Buildings")
-    for f in sorted(glob.glob(os.path.join(DATA, "bld_*.npz"))):
-        d = np.load(f)
-        ob = make_mesh(os.path.basename(f)[:-4], d["v"], d["loops"], d["ptot"], bc)
-        ob.data.materials.append(mb)
-        print("loaded", os.path.basename(f), len(d["v"]), flush=True)
-
-    # 카메라
-    add_camera(sc, CFG["camera"], "Camera")
-
-    # 조명·월드
     sd = bpy.data.lights.new("Sun", "SUN")
     sd.energy = 4.5
     sd.angle = math.radians(4)
@@ -253,15 +259,14 @@ def build():
     bg.inputs["Color"].default_value = world_col + (1,)
     bg.inputs["Strength"].default_value = world_str
 
-    # 렌더
     sc.render.engine = "CYCLES"
-    sc.cycles.samples = CFG["samples"]
+    sc.cycles.samples = cfg["samples"]
     sc.cycles.use_denoising = True
     try:
         sc.cycles.device = "GPU"
     except Exception:
         pass
-    sc.render.resolution_x, sc.render.resolution_y = CFG["render_w"], CFG["render_h"]
+    sc.render.resolution_x, sc.render.resolution_y = cfg["render_w"], cfg["render_h"]
     try:
         sc.view_settings.view_transform = "Filmic"
     except Exception:
@@ -273,9 +278,9 @@ def build():
         except Exception:
             pass
     sc.unit_settings.system = "METRIC"
-    setup_ao(sc, world_col, world_str)
-
-    # 3D 뷰 클리핑 (UI 가 있을 때)
+    setup_ao(sc, cfg, world_col, world_str)
+    for i, cam in enumerate(cfg["cameras"]):
+        add_camera(sc, cam, cam.get("name") or f"Cam_{i + 1:02d}", cfg)
     for scr in bpy.data.screens:
         for ar in scr.areas:
             if ar.type == "VIEW_3D":
@@ -284,29 +289,26 @@ def build():
                         sp.clip_start, sp.clip_end = 10, 300000
 
 
-if A.get("camera"):
-    # 기존 .blend 의 카메라만 교체: 새 카메라를 추가하고 활성 카메라로 지정
-    cam_cfg = json.load(open(A["camera"], encoding="utf-8"))
-    sc = bpy.context.scene
-    n = 1 + len([o for o in bpy.data.objects if o.type == "CAMERA"])
-    add_camera(sc, cam_cfg, f"Camera_{cam_cfg.get('source', 'web')}_{n}")
+if A.get("cameras"):
+    cams = json.load(open(A["cameras"], encoding="utf-8"))
+    cfg = cams.get("cfg", {})
+    for cam in cams["cameras"]:
+        add_camera(bpy.context.scene, cam, cam.get("name") or "Camera", cfg)
     bpy.ops.wm.save_as_mainfile(filepath=bpy.data.filepath, compress=True)
     print("SAVED", bpy.data.filepath, flush=True)
-    raise SystemExit(0)
-
-build()
-for im in bpy.data.images:
-    if im.filepath:
-        im.pack()
-out = A.get("out")
-if out:
-    bpy.ops.wm.save_as_mainfile(filepath=out, compress=True)
-    print("SAVED", out, flush=True)
-pv = A.get("preview")
-if pv:
-    sc = bpy.context.scene
-    sc.render.resolution_x, sc.render.resolution_y = 1200, 800
-    sc.cycles.samples = 16
-    sc.render.filepath = pv
-    bpy.ops.render.render(write_still=True)
-    print("PREVIEW", pv, flush=True)
+else:
+    CFG = json.load(open(A["scene"], encoding="utf-8"))
+    build(CFG)
+    for im in bpy.data.images:
+        if im.filepath:
+            im.pack()
+    if A.get("out"):
+        bpy.ops.wm.save_as_mainfile(filepath=A["out"], compress=True)
+        print("SAVED", A["out"], flush=True)
+    if A.get("preview"):
+        sc = bpy.context.scene
+        sc.render.resolution_percentage = 40
+        sc.cycles.samples = 16
+        sc.render.filepath = A["preview"]
+        bpy.ops.render.render(write_still=True)
+        print("PREVIEW", A["preview"], flush=True)

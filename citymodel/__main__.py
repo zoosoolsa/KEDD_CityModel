@@ -6,20 +6,19 @@ import sys
 def main():
     ap = argparse.ArgumentParser(prog="citymodel")
     ap.add_argument("--config", help="settings.json 경로 (지정하면 GUI 없이 실행)")
-    ap.add_argument("--no-blender", action="store_true", help="Blender 단계 생략")
     a, _ = ap.parse_known_args()
     if a.config:
         from .config import Settings
-        from .pipeline import run
+        from .pipeline import run_job, bbox_camera, url_camera
         from .util import Reporter
         s = Settings.load(a.config)
-        if a.no_blender:
-            s.blender_path = "__none__"
         errs = s.validate()
         if errs:
             print("\n".join(errs))
             sys.exit(1)
-        run(s, Reporter(progress=lambda p: None))
+        cam = url_camera(s, s.camera_url) if s.camera_url.strip() else bbox_camera(s)
+        out, how = run_job(s, s.project_name, [cam], Reporter(progress=lambda p: None))
+        print(f"{how}: {out}")
     else:
         from .gui import main as gui_main
         gui_main()

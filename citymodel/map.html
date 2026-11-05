@@ -1,0 +1,110 @@
+<!DOCTYPE html>
+<html lang="ko">
+<head>
+<meta charset="UTF-8" />
+<title>KEDD CityModel — 브이월드 3D 지도</title>
+<style>
+  html, body { margin: 0; height: 100%; overflow: hidden; font-family: -apple-system, "Malgun Gothic", sans-serif; }
+  #vmap { position: absolute; inset: 0; }
+  #panel { position: absolute; top: 12px; left: 12px; z-index: 10; background: rgba(255,255,255,.95); border-radius: 10px;
+           box-shadow: 0 2px 12px rgba(0,0,0,.25); padding: 12px 14px; width: 300px; font-size: 13px; color: #222; }
+  #panel h3 { margin: 0 0 8px; font-size: 14px; }
+  #panel input { width: 100%; box-sizing: border-box; padding: 6px 8px; border: 1px solid #ccc; border-radius: 6px; font-size: 13px; }
+  #panel button { margin-top: 8px; width: 100%; padding: 9px; border: 0; border-radius: 6px; font-size: 14px; cursor: pointer; }
+  #send { background: #e8742a; color: #fff; font-weight: 600; }
+  #send:disabled { background: #bbb; }
+  #msg { margin-top: 8px; line-height: 1.45; color: #444; white-space: pre-line; }
+  #results div { padding: 4px 2px; cursor: pointer; border-bottom: 1px solid #eee; }
+  #results div:hover { background: #f3f3f3; }
+  .hint { color: #777; font-size: 12px; margin-top: 6px; }
+</style>
+<script type="text/javascript" src="https://map.vworld.kr/js/webglMapInit.js.do?version=2.0&apiKey=__APIKEY__"></script>
+</head>
+<body>
+<div id="vmap"></div>
+<div id="panel">
+  <h3>시점 잡기 → 앱으로 보내기</h3>
+  <input id="q" placeholder="장소·주소 검색 (Enter)" />
+  <div id="results"></div>
+  <button id="send" disabled>이 시점으로 생성</button>
+  <div id="msg">지도를 불러오는 중…</div>
+  <div class="hint">드래그: 이동 · 우클릭 드래그/Ctrl: 회전·기울기 · 휠: 확대<br>
+  이미 만든 범위면 카메라만 추가되고, 없는 범위만 새로 만듭니다.</div>
+</div>
+<script>
+var KEY = "__APIKEY__", DOMAIN = "__DOMAIN__";
+var INIT = __INIT__;
+var map = new vw.Map("vmap", new vw.MapOptions(
+  vw.BasemapType.GRAPHIC, "", vw.DensityType.BASIC, vw.DensityType.BASIC, false,
+  new vw.CameraPosition(new vw.CoordZ(INIT.lon, INIT.lat, 1500000), new vw.Direction(0, -90, 0)),
+  new vw.CameraPosition(new vw.CoordZ(INIT.lon, INIT.lat, INIT.alt), new vw.Direction(INIT.heading, INIT.tilt, 0))
+));
+var msg = document.getElementById("msg"), btn = document.getElementById("send");
+
+function viewer() { return (window.ws3d && ws3d.viewer) ? ws3d.viewer : null; }
+var ready = setInterval(function () {
+  if (viewer() && window.ws3d.common) { clearInterval(ready); btn.disabled = false; msg.textContent = "원하는 구도를 잡고 [이 시점으로 생성]을 누르세요."; }
+}, 500);
+
+function deg(r) { return r * 180 / Math.PI; }
+var C = function () { return ws3d.common; };
+function capture() {
+  var v = viewer(), c = v.camera, cg = c.positionCartographic, cv = v.canvas;
+  var W = cv.clientWidth, H = cv.clientHeight, pts = [];
+  for (var i = 0; i <= 8; i++) for (var j = 0; j <= 8; j++) {
+    var p = c.pickEllipsoid(new (C().Cartesian2)(W * i / 8, H * j / 8), v.scene.globe.ellipsoid);
+    if (p) { var g = C().Cartographic.fromCartesian(p); pts.push([deg(g.longitude), deg(g.latitude)]); }
+  }
+  return { kind: "vworld", lon: deg(cg.longitude), lat: deg(cg.latitude), height: cg.height,
+           heading: (deg(c.heading) + 360) % 360, pitch: deg(c.pitch), roll: deg(c.roll),
+           fov: deg(c.frustum.fovy || c.frustum.fov), aspect: W / H, footprint: pts };
+}
+btn.onclick = function () {
+  var cam;
+  try { cam = capture(); } catch (e) { msg.textContent = "시점을 읽지 못했습니다: " + e; return; }
+  if (cam.footprint.length < 3) { msg.textContent = "땅이 보이도록 카메라를 조금 더 내려 주세요."; return; }
+  btn.disabled = true; msg.textContent = "앱으로 보내는 중…";
+  fetch("/capture", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(cam) })
+    .then(function (r) { return r.json(); })
+    .then(function (d) { msg.textContent = d.message || "앱에서 확인하세요."; })
+    .catch(function (e) { msg.textContent = "앱에 연결하지 못했습니다. 앱이 켜져 있는지 확인하세요."; })
+    .finally(function () { btn.disabled = false; });
+};
+
+// 장소 검색 (브이월드 검색 API, JSONP)
+function jsonp(url, params) {
+  return new Promise(function (res, rej) {
+    var cb = "cb" + Math.random().toString(36).slice(2), s = document.createElement("script");
+    window[cb] = function (d) { res(d); delete window[cb]; s.remove(); };
+    params.callback = cb;
+    s.src = url + "?" + new URLSearchParams(params); s.onerror = rej; document.body.appendChild(s);
+  });
+}
+document.getElementById("q").addEventListener("keydown", function (e) {
+  if (e.key !== "Enter") return;
+  var q = this.value.trim(); if (!q) return;
+  var box = document.getElementById("results"); box.textContent = "검색 중…";
+  var base = { service: "search", request: "search", version: "2.0", size: 8, page: 1, query: q, format: "json",
+               errorformat: "json", key: KEY, domain: DOMAIN, crs: "EPSG:4326" };
+  Promise.all([jsonp("https://api.vworld.kr/req/search", Object.assign({ type: "place" }, base)),
+               jsonp("https://api.vworld.kr/req/search", Object.assign({ type: "address", category: "road" }, base))])
+    .then(function (rs) {
+      box.innerHTML = "";
+      rs.forEach(function (d) {
+        var items = (d.response && d.response.result && d.response.result.items) || [];
+        items.forEach(function (it) {
+          var el = document.createElement("div");
+          el.textContent = it.title || (it.address && (it.address.road || it.address.parcel)) || "";
+          el.onclick = function () {
+            map.moveTo(new vw.CameraPosition(new vw.CoordZ(+it.point.x, +it.point.y - 0.012, 1600), new vw.Direction(0, -45, 0)));
+            box.innerHTML = "";
+          };
+          box.appendChild(el);
+        });
+      });
+      if (!box.children.length) box.textContent = "검색 결과 없음";
+    }).catch(function () { box.textContent = "검색 실패"; });
+});
+</script>
+</body>
+</html>

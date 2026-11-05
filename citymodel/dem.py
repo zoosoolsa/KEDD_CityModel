@@ -30,9 +30,17 @@ def _read_geotiff(path):
     return a, lon0, lat0, sx, sy
 
 
-def build_terrain(s, rep: Reporter, out_path):
-    lon_min, lat_min, lon_max, lat_max = s.bbox
+def build_terrain(s, rep: Reporter, out_path, tm_bounds=None):
+    """tm_bounds: (xmin, ymin, xmax, ymax) EPSG:5186 — 격자는 res 의 배수에 정렬 (타일 경계와 꼭짓점 일치)"""
     res = s.dem_res
+    if tm_bounds is None:
+        lon_min, lat_min, lon_max, lat_max = s.bbox
+        xs, ys = to_tm(np.array([lon_min, lon_max, lon_min, lon_max]), np.array([lat_min, lat_min, lat_max, lat_max]))
+        tm_bounds = (min(xs) - 1000, min(ys) - 1000, max(xs) + 1000, max(ys) + 1000)
+    xmin, ymin = np.floor(tm_bounds[0] / res) * res, np.floor(tm_bounds[1] / res) * res
+    xmax, ymax = np.ceil(tm_bounds[2] / res) * res, np.ceil(tm_bounds[3] / res) * res
+    lons, lats = to_ll(np.array([xmin, xmax, xmin, xmax]), np.array([ymin, ymin, ymax, ymax]))
+    lon_min, lon_max, lat_min, lat_max = min(lons), max(lons), min(lats), max(lats)
     # --- 타일 확보 ---
     tiles = []
     if s.dem_files:
@@ -42,30 +50,23 @@ def build_terrain(s, rep: Reporter, out_path):
                 for lo in range(math.floor(lon_min), math.floor(lon_max) + 1)]
         for i, (la, lo) in enumerate(need):
             dest = os.path.join(s.cache_dir, "dem", f"cop30_N{la}_E{lo}.tif")
-            rep.log(f"   지형 타일 N{la} E{lo} 확인/다운로드")
             p = download(COP_URL.format(lat=la, lon=lo), dest, rep, label=f"DEM N{la}E{lo}")
             if p:
                 tiles.append(p)
             else:
-                rep.log(f"   (N{la} E{lo} 타일 없음 → 바다로 간주)")
+                rep.log(f"   (N{la} E{lo} 지형 타일 없음 → 바다로 간주)")
             rep.progress((i + 1) / len(need) * 0.5)
     if not tiles:
         raise RuntimeError("지형(DEM) 타일을 하나도 얻지 못했습니다.")
 
-    # --- 목표 격자 (EPSG:5186) ---
-    xs, ys = to_tm(np.array([lon_min, lon_max, lon_min, lon_max]), np.array([lat_min, lat_min, lat_max, lat_max]))
-    xmin, xmax = np.floor((min(xs) - 1000) / res) * res, np.ceil((max(xs) + 1000) / res) * res
-    ymin, ymax = np.floor((min(ys) - 1000) / res) * res, np.ceil((max(ys) + 1000) / res) * res
-    W, H = int((xmax - xmin) / res), int((ymax - ymin) / res)
+    W, H = int(round((xmax - xmin) / res)) + 1, int(round((ymax - ymin) / res)) + 1
     cx, cy = round((xmin + xmax) / 2 / 10) * 10, round((ymin + ymax) / 2 / 10) * 10
-    rep.log(f"   지형 격자 {W}×{H} ({W*res/1000:.1f}×{H*res/1000:.1f}km, {res:.0f}m)")
-
-    X = xmin + (np.arange(W) + 0.5) * res
-    Y = ymax - (np.arange(H) + 0.5) * res
+    rep.log(f"   지형 격자 {W}×{H} ({(W-1)*res/1000:.1f}×{(H-1)*res/1000:.1f}km, {res:.0f}m)")
+    X = xmin + np.arange(W) * res
+    Y = ymax - np.arange(H) * res
     out = np.full((H, W), np.nan, np.float32)
     for ti, path in enumerate(tiles):
         a, lon0, lat0, dlon, dlat = _read_geotiff(path)
-        # 행 단위로 처리 (메모리 절약)
         for r0 in range(0, H, 256):
             r1 = min(H, r0 + 256)
             gx, gy = np.meshgrid(X, Y[r0:r1])
@@ -105,7 +106,7 @@ def build_terrain(s, rep: Reporter, out_path):
     ground[water] = wl - 2.0
 
     np.savez_compressed(out_path, z=ground.astype(np.float32), water=water.astype(np.uint8), res=res,
-                        x0=xmin - cx, y0=ymax - cy, water_level=wl, origin=np.array([cx, cy]))
+                        x0=xmin - cx, y0=ymax - cy, water_level=wl, origin=np.array([cx, cy], float))
     rep.progress(1.0)
     rep.log(f"   고도 {ground.min():.0f}~{ground.max():.0f}m, 물 {water.mean()*100:.1f}%")
     return out_path

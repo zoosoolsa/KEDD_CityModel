@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 from typing import List
 
 APP_NAME = "KEDD CityModel"
-APP_VERSION = "1.2.0"
+APP_VERSION = "2.0.0"
 
 # 대략적인 시/도 범위 (경도 min, 위도 min, 경도 max, 위도 max)
 PRESETS = {
@@ -47,7 +47,9 @@ class Settings:
     blender_path: str = ""       # 비우면 자동 탐지
     # 처리 옵션
     exag: float = 1.6            # 지형 수직 과장
-    dem_res: float = 30.0        # 지형 격자 (m)
+    dem_res: float = 25.0        # 지형 격자 (m, 타일 4km 의 약수)
+    osm_max_age_days: int = 90   # OSM 자동 갱신 주기 (일)
+    api_heights: bool = True     # 브이월드 API(도로명주소건물 층수)로 높이 보완
     lc_res: float = 5.0          # 녹지/물 텍스처 해상도 (m)
     min_building_area: float = 15.0
     default_height: float = 7.0
@@ -74,7 +76,7 @@ class Settings:
 
     @property
     def project_dir(self):
-        return os.path.join(self.work_dir, self.project_name)
+        return os.path.join(self.work_dir, "projects", self.project_name)
 
     @property
     def cache_dir(self):
@@ -100,16 +102,9 @@ class Settings:
             errs.append("범위의 최소값이 최대값보다 작아야 합니다.")
         if not (124 <= self.lon_min <= 132 and 33 <= self.lat_min <= 39):
             errs.append("범위가 한국 밖입니다.")
-        w = (self.lon_max - self.lon_min) * 88.0
-        h = (self.lat_max - self.lat_min) * 111.0
-        if w * h > 6000:
-            errs.append(f"범위가 너무 큽니다 ({w:.0f}×{h:.0f}km). 약 80×75km 이하로 줄여주세요.")
         for p in self.building_zips:
             if not os.path.exists(p):
                 errs.append(f"파일이 없습니다: {p}")
-        import glob as _g
-        if not self.building_zips and not _g.glob(os.path.join(self.building_lib, "AL_D010_*.zip")):
-            errs.append("건물 데이터 폴더에 GIS건물통합정보 zip(AL_D010_시도_날짜.zip)이 없습니다.")
         if self.camera_url.strip():
             try:
                 from .webcam import parse_url

@@ -93,7 +93,7 @@ def download(url, dest, rep: Reporter, label=None, retries=3):
 
 
 class Terrain:
-    """terrain.npz (지형 격자, 셀 중심 기준) 를 읽어 높이를 bilinear 로 샘플."""
+    """terrain.npz (점 정렬 격자: (r,c) 꼭짓점 = (x0 + c*res, y0 - r*res)) 높이 샘플러"""
 
     def __init__(self, path, exag=1.0):
         t = np.load(path)
@@ -102,7 +102,7 @@ class Terrain:
         self.res = float(t["res"])
         self.x0 = float(t["x0"])     # 로컬 좌표 (원점 = origin)
         self.y0 = float(t["y0"])
-        self.origin = tuple(t["origin"])
+        self.origin = tuple(float(v) for v in t["origin"])
         self.H, self.W = self.z.shape
         self.exag = exag
 
@@ -110,8 +110,8 @@ class Terrain:
         """로컬 x,y → 지면 높이 * exag (지형 메쉬와 동일한 보간)"""
         x = np.asarray(x, float)
         y = np.asarray(y, float)
-        fx = np.clip((x - self.x0) / self.res - 0.5, 0, self.W - 1.001)
-        fy = np.clip((self.y0 - y) / self.res - 0.5, 0, self.H - 1.001)
+        fx = np.clip((x - self.x0) / self.res, 0, self.W - 1.001)
+        fy = np.clip((self.y0 - y) / self.res, 0, self.H - 1.001)
         c = fx.astype(int)
         r = fy.astype(int)
         dx = fx - c
@@ -122,14 +122,14 @@ class Terrain:
         return v * self.exag
 
     def is_water(self, x, y):
-        c = np.clip(((np.asarray(x) - self.x0) / self.res).astype(int), 0, self.W - 1)
-        r = np.clip(((self.y0 - np.asarray(y)) / self.res).astype(int), 0, self.H - 1)
+        c = np.clip(np.round((np.asarray(x) - self.x0) / self.res).astype(int), 0, self.W - 1)
+        r = np.clip(np.round((self.y0 - np.asarray(y)) / self.res).astype(int), 0, self.H - 1)
         return self.water[r, c] > 0
 
     @property
     def extent(self):
-        """로컬 (xmin, ymin, xmax, ymax)"""
-        return (self.x0, self.y0 - self.H * self.res, self.x0 + self.W * self.res, self.y0)
+        """로컬 (xmin, ymin, xmax, ymax) — 꼭짓점 범위"""
+        return (self.x0, self.y0 - (self.H - 1) * self.res, self.x0 + (self.W - 1) * self.res, self.y0)
 
 
 class MeshAcc:
@@ -160,12 +160,15 @@ class MeshAcc:
     def empty(self):
         return self.n == 0
 
-    def save(self, path):
+    def save(self, path, offset=(0.0, 0.0)):
         if self.empty():
             if os.path.exists(path):
                 os.remove(path)
             return 0
-        np.savez_compressed(path, v=np.vstack(self.V), loops=np.concatenate(self.L),
+        v = np.vstack(self.V).astype(np.float64)
+        v[:, 0] += offset[0]
+        v[:, 1] += offset[1]
+        np.savez_compressed(path, v=v.astype(np.float32), loops=np.concatenate(self.L),
                             ptot=np.array(self.P, np.int32), mat=np.array(self.M, np.int32))
         return self.n
 

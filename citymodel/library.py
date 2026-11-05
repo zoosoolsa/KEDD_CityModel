@@ -312,16 +312,47 @@ def load_catalog(lib):
     return {}, None
 
 
+_SIDO_GEOM = None
+
+
+def sido_geoms():
+    """앱에 내장된 시도 경계 (OSM admin_level=4, 약 400m 단순화)"""
+    global _SIDO_GEOM
+    if _SIDO_GEOM is None:
+        import sys
+        import shapely
+        base = getattr(sys, "_MEIPASS", os.path.dirname(os.path.abspath(__file__)))
+        p = os.path.join(base, "sido.json")
+        if not os.path.exists(p):
+            p = os.path.join(base, "citymodel", "sido.json")
+        _SIDO_GEOM = {c: shapely.from_wkt(w) for c, w in json.load(open(p, encoding="utf-8")).items()}
+    return _SIDO_GEOM
+
+
+def needed_codes(bbox):
+    """경위도 bbox 와 실제로 겹치는 시도 코드"""
+    from shapely.geometry import box
+    b = box(*bbox)
+    try:
+        return {c for c, g in sido_geoms().items() if g.intersects(b)}
+    except Exception:
+        return None
+
+
 def overview(lib, bbox=None):
     """GUI 목록: 현재 16개 시도 × (브이월드 최신, 내 폴더, 상태, 범위 필요 여부)"""
     cat, fetched = load_catalog(lib)
     have = scan(lib) if os.path.isdir(lib) else {}
     rows = []
+    need_set = needed_codes(bbox) if bbox else set()
     for code, bb in CURRENT:
         c = cat.get(code)
         h = have.get(code)
         boxes = bb if isinstance(bb, list) else [bb]
-        need = bool(bbox) and any(not (b[2] < bbox[0] or b[0] > bbox[2] or b[3] < bbox[1] or b[1] > bbox[3]) for b in boxes)
+        if need_set is not None:
+            need = code in need_set
+        else:
+            need = bool(bbox) and any(not (b[2] < bbox[0] or b[0] > bbox[2] or b[3] < bbox[1] or b[1] > bbox[3]) for b in boxes)
         fmt = lambda d: f"{d[:4]}-{d[4:6]}-{d[6:]}" if d else "-"
         if h and (not c or h["date"] >= c["date"]):
             state = "보유"
@@ -333,3 +364,47 @@ def overview(lib, bbox=None):
                          size=f"{c['size_mb']}MB" if c else "", state=state, need=need,
                          url=DOWNLOAD_URL.format(no=c["fileNo"]) if c else VWORLD_PAGE))
     return rows, fetched
+
+
+def download_watch(lib, codes, rep_log, done_cb=None, timeout_min=45, stop=lambda: False):
+    """다운로드 폴더를 지켜보다가 요청한 시도의 AL_D010 zip 이 다 받아지면 라이브러리로 옮기고 인덱스까지 만든다."""
+    import time as _t
+    from .util import Reporter
+    dl = os.path.join(os.path.expanduser("~"), "Downloads")
+    want = set(codes)
+    t0 = _t.time()
+    sizes = {}
+    while want and _t.time() - t0 < timeout_min * 60 and not stop():
+        cur = scan(lib) if os.path.isdir(lib) else {}
+        for p in glob.glob(os.path.join(dl, "AL_D010_*.zip")):
+            m = FNAME.search(os.path.basename(p))
+            if not m or m.group(1) not in want:
+                continue
+            if cur.get(m.group(1)) and cur[m.group(1)]["date"] >= m.group(2):
+                want.discard(m.group(1))
+                continue
+            if any(os.path.exists(p + ext) for ext in (".crdownload", ".download", ".part")):
+                continue
+            sz = os.path.getsize(p)
+            if sizes.get(p) != sz or sz == 0:          # 크기가 두 번 연속 같아야 완료로 봄
+                sizes[p] = sz
+                continue
+            try:
+                got = import_files(lib, [p], move=True)
+            except Exception as e:
+                rep_log(f"가져오기 실패 {os.path.basename(p)}: {e}")
+                continue
+            code = m.group(1)
+            want.discard(code)
+            rep_log(f"✔ {SIDO.get(code, code)} 건물 데이터를 폴더로 옮겼습니다 → 인덱스 생성 중")
+            try:
+                build_index(lib, code, m.group(2), got[0] if got else os.path.join(lib, os.path.basename(p)),
+                            Reporter(log=rep_log))
+            except Exception as e:
+                rep_log(f"인덱스 생성 실패: {e}")
+            remove_old(lib)
+            if done_cb:
+                done_cb()
+        _t.sleep(3)
+    if want and not stop():
+        rep_log("다운로드를 기다리다 시간이 지났습니다: " + ", ".join(SIDO.get(c, c) for c in want))

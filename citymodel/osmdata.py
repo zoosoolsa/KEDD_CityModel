@@ -83,16 +83,28 @@ class _Handler(osmium.SimpleHandler):
             self.green.append(g.wkb)
 
 
+def ensure_pbf(s, rep: Reporter, max_age_days=None):
+    """pbf 경로와 버전(날짜) 반환. 자동 모드면 없거나 너무 오래됐을 때 받음"""
+    import datetime as dt
+    pbf = s.osm_pbf
+    if not pbf:
+        pbf = os.path.join(s.cache_dir, "osm", "south-korea-latest.osm.pbf")
+        age = (dt.datetime.now().timestamp() - os.path.getmtime(pbf)) / 86400 if os.path.exists(pbf) else None
+        if age is not None and max_age_days and age > max_age_days:
+            rep.log(f"   OSM 데이터가 {age:.0f}일 지나 새로 받습니다")
+            os.replace(pbf, pbf + ".old")
+        if not os.path.exists(pbf):
+            rep.log("   OSM 한국 데이터 다운로드 (약 300MB)")
+        download(GEOFABRIK, pbf, rep, label="OSM")
+    ver = dt.date.fromtimestamp(os.path.getmtime(pbf)).isoformat()
+    return pbf, ver
+
+
 def get_osm(s, rep: Reporter):
     """반환: dict(ways, buildings, green, water)  (WGS84)"""
     key = hashlib.md5(("%.4f,%.4f,%.4f,%.4f|" % s.bbox + (s.osm_pbf or "auto")).encode()).hexdigest()[:10]
     cache = os.path.join(s.cache_dir, "osm", f"extract_{key}.pkl")
-    pbf = s.osm_pbf
-    if not pbf:
-        pbf = os.path.join(s.cache_dir, "osm", "south-korea-latest.osm.pbf")
-        if not os.path.exists(pbf):
-            rep.log("   OSM 한국 데이터 다운로드 (약 300MB, 최초 1회)")
-        download(GEOFABRIK, pbf, rep, label="OSM")
+    pbf, _ = ensure_pbf(s, rep)
     if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(pbf):
         rep.log("   (캐시된 OSM 추출 결과 사용)")
         return pickle.load(open(cache, "rb"))

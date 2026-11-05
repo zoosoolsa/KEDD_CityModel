@@ -11,9 +11,9 @@ Image.MAX_IMAGE_PIXELS = None
 def build_landcover(s, osm, terrain, rep: Reporter, out_png):
     xmin, ymin, xmax, ymax = terrain.extent
     res = s.lc_res
-    while ((xmax - xmin) / res) * ((ymax - ymin) / res) > 120e6:
-        res *= 1.25
-    w, h = int((xmax - xmin) / res), int((ymax - ymin) / res)
+    while ((xmax - xmin) / res) * ((ymax - ymin) / res) > 160e6:
+        res *= 2
+    w, h = int(round((xmax - xmin) / res)), int(round((ymax - ymin) / res))
     cx, cy = terrain.origin
     gx0, gy0 = xmin + cx, ymax + cy
     rep.log(f"   텍스처 {w}×{h}px ({res:.1f}m)")
@@ -40,8 +40,8 @@ def build_landcover(s, osm, terrain, rep: Reporter, out_png):
     water = draw(osm["water"], 0.6, 0.85)
     # 지형에서 찾은 물 (한강·바다 등) 합치기
     tw = terrain.water.astype(bool)
-    ys = np.clip(((np.arange(h) + 0.5) * res / terrain.res).astype(int), 0, terrain.H - 1)
-    xs = np.clip(((np.arange(w) + 0.5) * res / terrain.res).astype(int), 0, terrain.W - 1)
+    ys = np.clip(np.round((np.arange(h) + 0.5) * res / terrain.res).astype(int), 0, terrain.H - 1)
+    xs = np.clip(np.round((np.arange(w) + 0.5) * res / terrain.res).astype(int), 0, terrain.W - 1)
     tw_up = tw[ys][:, xs]
     tw_up = nd.binary_erosion(tw_up, iterations=1)
     water |= tw_up
@@ -51,10 +51,11 @@ def build_landcover(s, osm, terrain, rep: Reporter, out_png):
         return (nd.gaussian_filter(m.astype(np.float32), 0.7) * 255).clip(0, 255).astype(np.uint8)
 
     img = np.dstack([soft(green), soft(water), np.zeros((h, w), np.uint8)])
-    Image.fromarray(img).save(out_png, optimize=True)
     rep.progress(1.0)
     rep.log(f"   녹지 {green.mean()*100:.1f}%, 물 {water.mean()*100:.1f}%")
-    return out_png
+    if out_png:
+        Image.fromarray(img).save(out_png, optimize=True)
+    return img, res
 
 
 def preview_png(lc_png, path, s, width=1000):
