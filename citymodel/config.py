@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 from typing import List
 
 APP_NAME = "KEDD CityModel"
-APP_VERSION = "2.0.0"
+APP_VERSION = "2.1.0"
 
 # 대략적인 시/도 범위 (경도 min, 위도 min, 경도 max, 위도 max)
 PRESETS = {
@@ -55,7 +55,7 @@ class Settings:
     default_height: float = 7.0
     use_osm_buildings: bool = True
     include_minor_roads: bool = True
-    road_offset: float = 0.15   # 다리 양끝이 지면에 닿는 높이
+    bridge_end_offset: float = 0.15   # 다리 양끝이 지면에 닿는 높이 (m)
     landmarks: list = field(default_factory=lambda: [dict(x) for x in DEFAULT_LANDMARKS])
     # 렌더/색
     col_building: tuple = (0.88, 0.88, 0.88)
@@ -68,7 +68,7 @@ class Settings:
     render_w: int = 3000
     render_h: int = 2000
     samples: int = 96
-    preview_render: bool = False   # 완료 후 저해상도 미리보기 렌더
+    thumbnails: bool = True          # 카메라 썸네일 (프로젝트/thumbs, .blend 에도 포함)
 
     @property
     def bbox(self):

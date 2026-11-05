@@ -51,6 +51,52 @@ def scene_script_path():
     return p
 
 
+def addon_path():
+    return os.path.join(os.path.dirname(scene_script_path()), "kedd_cameras.py")
+
+
+ADDON_VERSION = "1.0.0"
+_MARK = os.path.join(os.path.expanduser("~"), ".kedd_citymodel_addon.json")
+
+
+def install_addon(blender, log=print):
+    """Blender 사용자 설정에 'KEDD 카메라' 애드온 설치·활성화 (버전이 바뀌었을 때만)"""
+    import json
+    try:
+        mark = json.load(open(_MARK, encoding="utf-8"))
+    except Exception:
+        mark = {}
+    if mark.get(blender) == ADDON_VERSION:
+        return True
+    expr = ("import bpy\n"
+            f"bpy.ops.preferences.addon_install(filepath={addon_path()!r}, overwrite=True)\n"
+            "bpy.ops.preferences.addon_enable(module='kedd_cameras')\n"
+            "bpy.ops.wm.save_userpref()\n"
+            "print('KEDD_ADDON_OK')\n")
+    try:
+        out = subprocess.run([blender, "-b", "--python-expr", expr], capture_output=True, text=True, timeout=180,
+                             encoding="utf-8", errors="replace",
+                             creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)).stdout
+    except Exception as e:
+        log(f"   ⚠ Blender 카메라 패널 설치 실패: {e}")
+        return False
+    if "KEDD_ADDON_OK" in out:
+        mark[blender] = ADDON_VERSION
+        json.dump(mark, open(_MARK, "w", encoding="utf-8"))
+        log("   Blender 에 'KEDD 카메라' 패널을 설치했습니다 (3D 뷰 → N → KEDD)")
+        return True
+    log("   ⚠ Blender 카메라 패널 설치 실패 (앱에서 열면 패널은 그대로 사용 가능)")
+    return False
+
+
+def open_blend(blender, blend, camera=None):
+    """Blender GUI 로 열기 — 카메라 패널을 띄우고, camera 가 있으면 그 카메라 뷰로"""
+    cmd = [blender, blend, "--python", addon_path()]
+    if camera:
+        cmd += ["--", "--kedd-camera", camera]
+    return subprocess.Popen(cmd)
+
+
 def _copy_script(dst_dir):
     script = os.path.join(dst_dir, "blender_scene.py")
     shutil.copyfile(scene_script_path(), script)
@@ -64,7 +110,7 @@ def _stream(cmd, rep, cancel, steps=30):
     for line in p.stdout:
         line = line.rstrip()
         tail = (tail + [line])[-30:]
-        if line.startswith(("loaded", "SAVED", "PREVIEW")) or "Error" in line or "Traceback" in line:
+        if line.startswith(("loaded", "SAVED", "PREVIEW", "THUMB")) or "Error" in line or "Traceback" in line:
             rep.log("   [Blender] " + line)
             done += 1
             rep.progress(min(0.95, done / max(steps, 1)))

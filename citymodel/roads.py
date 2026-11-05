@@ -31,7 +31,7 @@ def _smoothstep(x):
 
 def build_roads(s, osm, terrain, rep: Reporter, sink):
     cx, cy = terrain.origin
-    off = s.road_offset
+    off = s.bridge_end_offset
     blines, bw = [], []
     ways = osm["ways"]
     for k, w in enumerate(ways):

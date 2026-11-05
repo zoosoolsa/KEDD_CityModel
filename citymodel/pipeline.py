@@ -64,16 +64,41 @@ def scene_cfg(s: Settings, store: Store, proj: Project):
         col_water=list(s.col_water), col_road=list(s.col_road),
         ao_distance=s.ao_distance, ao_strength=s.ao_strength,
         render_w=s.render_w, render_h=s.render_h, samples=s.samples,
+        thumbs=_thumbs_dir(proj, s), project=proj.path,
     )
 
 
+def _thumbs_dir(proj, s):
+    """카메라 썸네일 폴더 (끄면 None)"""
+    return os.path.join(proj.dir, "thumbs") if s.thumbnails else None
+
+
 def _name_cams(proj, cams):
+    import uuid
+    import datetime as dt
     n = len(proj.d["cameras"])
+    now = dt.datetime.now().isoformat(timespec="minutes")
     for i, c in enumerate(cams):
+        src = {"vworld": "브이월드", "view": c.get("source", "웹지도"), "default": "범위"}.get(c["kind"], "cam")
+        c.setdefault("id", uuid.uuid4().hex[:8])
+        c.setdefault("created", now)
         if not c.get("name"):
-            src = {"vworld": "브이월드", "view": c.get("source", "웹지도"), "default": "전체"}.get(c["kind"], "cam")
             c["name"] = f"Cam_{n + i + 1:02d}_{src}"
+        if not c.get("label"):
+            if c["kind"] == "vworld":
+                c["label"] = f"{src} · {c['lat']:.5f}, {c['lon']:.5f} · 높이 {c['height']:.0f}m · 방위 {c['heading']:.0f}°"
+            elif c["kind"] == "view":
+                c["label"] = f"{src} · {c['lat']:.5f}, {c['lon']:.5f} · 거리 {c['range']:.0f}m"
+            else:
+                c["label"] = src
     return cams
+
+
+def _ensure_ids(proj):
+    """예전 프로젝트의 카메라에 id 부여"""
+    import uuid
+    for c in proj.d["cameras"]:
+        c.setdefault("id", uuid.uuid4().hex[:8])
 
 
 def run_job(s: Settings, project_name, cams, rep: Reporter, cancel=lambda: False):
@@ -86,6 +111,7 @@ def run_job(s: Settings, project_name, cams, rep: Reporter, cancel=lambda: False
         rep.log(f"⚠ 지형 과장이 {s.exag} 로 바뀌어 기존 타일을 모두 다시 만듭니다")
     blender = "" if s.blender_path == "__none__" else (s.blender_path or blender_runner.find_blender())
     proj = Project(store, project_name)
+    _ensure_ids(proj)
     cams = _name_cams(proj, [dict(c) for c in cams])
 
     needed = set()
@@ -111,10 +137,13 @@ def run_job(s: Settings, project_name, cams, rep: Reporter, cancel=lambda: False
         rep.set_stage(0.1, 1.0, "카메라만 추가 (모델 재사용)")
         resolved = [resolve_camera(store, c, proj.d["origin"]) for c in cams]
         cj = os.path.join(proj.dir, "cameras_add.json")
-        json.dump(dict(cameras=resolved, cfg=dict(render_w=s.render_w)), open(cj, "w", encoding="utf-8"), ensure_ascii=False)
+        json.dump(dict(cameras=resolved, cfg=dict(render_w=s.render_w, thumbs=_thumbs_dir(proj, s), project=proj.path,
+                                                  origin=proj.d["origin"])),
+                  open(cj, "w", encoding="utf-8"), ensure_ascii=False)
         blender_runner.run_cameras(blender, proj.blend, cj, rep, cancel)
         proj.d["cameras"] += cams
         proj.save()
+        blender_runner.install_addon(blender, rep.log)
         rep.log(f"✔ 카메라 {len(cams)}개 추가 ({time.time() - t0:.0f}초) → {proj.blend}")
         return proj.blend, "camera"
 
@@ -134,11 +163,11 @@ def run_job(s: Settings, project_name, cams, rep: Reporter, cancel=lambda: False
         return None, "tiles"
     rep.set_stage(0.80, 1.0, f"Blender 장면 조립 (타일 {len(proj.d['tiles'])}개, 카메라 {len(proj.d['cameras'])}개)")
     tmp = proj.blend + ".new.blend"
-    pv = os.path.join(proj.dir, "preview.png") if s.preview_render else None
-    blender_runner.run_scene(blender, sj, tmp, rep, preview=pv, cancel=cancel, ntiles=len(proj.d["tiles"]))
+    blender_runner.run_scene(blender, sj, tmp, rep, preview=None, cancel=cancel, ntiles=len(proj.d["tiles"]))
     os.replace(tmp, proj.blend)
     proj.d["versions"] = {f"{k[0]}_{k[1]}": (store.tile_meta(k) or {}).get("built") for k in proj.tiles}
     proj.save()
+    blender_runner.install_addon(blender, rep.log)
     rep.log(f"✔ 완료 ({(time.time() - t0) / 60:.1f}분) → {proj.blend}")
     return proj.blend, "build"
 

@@ -330,7 +330,16 @@ class Project:
 
 
 def resolve_camera(store: Store, cam, origin):
-    """카메라 사양 → Blender 장면 로컬 (location, rotation(rad), fov(deg))"""
+    """카메라 사양 → Blender 장면 로컬 (location, rotation(rad), fov(deg)) + 메타(id·만든 시각·설명)"""
+    r = _resolve_camera(store, cam, origin)
+    r.update({k: cam[k] for k in ("id", "created", "label") if cam.get(k)})
+    return r
+
+
+def _resolve_camera(store: Store, cam, origin):
+    if cam["kind"] == "fixed":        # Blender 에서 추가한 카메라 (전역 TM + 높이)
+        return dict(location=[cam["X"] - origin[0], cam["Y"] - origin[1], cam["z"]], rotation=cam["rotation"],
+                    fov=cam["fov"], aspect=cam.get("aspect"), name=cam.get("name"))
     if cam["kind"] == "vworld":       # 브이월드 3D 지도: 카메라 위치(타원체고) + 방향
         X, Y = to_tm(cam["lon"], cam["lat"])
         g_real = store.ground_at(X, Y, exag=False)
@@ -384,4 +393,6 @@ def camera_tiles(cam, store=None):
         return tiles_for_polygon_tm([(X - half, Y - half), (X + half, Y + half)])
     if cam["kind"] == "default":
         return tiles_in_tm_bounds(cam["tm_bounds"])
+    if cam["kind"] == "fixed":
+        return tiles_for_polygon_tm([(cam["X"] - 1500, cam["Y"] - 1500), (cam["X"] + 1500, cam["Y"] + 1500)])
     return set()

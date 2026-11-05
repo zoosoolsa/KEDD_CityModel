@@ -180,7 +180,61 @@ def add_camera(sc, cam, name, cfg):
     if asp:
         sc.render.resolution_x = cfg.get("render_w", 3000)
         sc.render.resolution_y = int(round(sc.render.resolution_x / asp))
+    ob["kedd_res"] = [sc.render.resolution_x, sc.render.resolution_y]
+    for k in ("id", "created", "label"):
+        if cam.get(k):
+            ob["kedd_" + k] = cam[k]
     return ob
+
+
+def scene_meta(sc, cfg):
+    if cfg.get("project"):
+        sc["kedd_project"] = cfg["project"]
+    if cfg.get("origin"):
+        sc["kedd_origin"] = list(cfg["origin"])[:2]
+
+
+def make_thumbs(sc, obs, d, width=480):
+    """카메라별 썸네일 (Cycles 저샘플). 이미 있는 파일은 다시 렌더하지 않고 그대로 넣는다."""
+    if not d:
+        return
+    os.makedirs(d, exist_ok=True)
+    keep = (sc.camera, sc.render.resolution_x, sc.render.resolution_y, sc.render.resolution_percentage,
+            sc.cycles.samples, sc.render.filepath)
+    for ob in obs:
+        p = os.path.join(d, ob.get("kedd_id", ob.name) + ".png")
+        if not os.path.exists(p):
+            r = ob.get("kedd_res") or [3, 2]
+            sc.camera = ob
+            sc.render.resolution_x, sc.render.resolution_y = width, max(1, int(width * r[1] / r[0]))
+            sc.render.resolution_percentage = 100
+            sc.cycles.samples = 12
+            sc.render.filepath = p
+            try:
+                bpy.ops.render.render(write_still=True)
+            except Exception as e:
+                print("thumb fail", e, flush=True)
+                continue
+            print("THUMB", ob.name, flush=True)
+        if os.path.exists(p):
+            nm = "KEDD_thumb_" + ob.get("kedd_id", ob.name)
+            old = bpy.data.images.get(nm)
+            if old:
+                bpy.data.images.remove(old)
+            im = bpy.data.images.load(p)
+            im.name = nm
+            im.pack()
+            im.use_fake_user = True
+            ob["kedd_thumb"] = im.name
+    (sc.camera, sc.render.resolution_x, sc.render.resolution_y, sc.render.resolution_percentage,
+     sc.cycles.samples, sc.render.filepath) = keep
+
+
+def _no_sync_handler():
+    # 설치된 KEDD 애드온의 저장 후 동기화는 앱이 직접 project.json 을 관리하는 백그라운드 실행에서는 끔
+    for h in list(bpy.app.handlers.save_post):
+        if getattr(h, "__name__", "") == "_save_post" and "kedd" in getattr(h, "__module__", ""):
+            bpy.app.handlers.save_post.remove(h)
 
 
 def setup_ao(sc, cfg, world_col, world_str):
@@ -305,26 +359,32 @@ def build(cfg):
             pass
     sc.unit_settings.system = "METRIC"
     setup_ao(sc, cfg, world_col, world_str)
-    for i, cam in enumerate(cfg["cameras"]):
-        add_camera(sc, cam, cam.get("name") or f"Cam_{i + 1:02d}", cfg)
+    obs = [add_camera(sc, cam, cam.get("name") or f"Cam_{i + 1:02d}", cfg) for i, cam in enumerate(cfg["cameras"])]
+    scene_meta(sc, cfg)
     for scr in bpy.data.screens:
         for ar in scr.areas:
             if ar.type == "VIEW_3D":
                 for sp in ar.spaces:
                     if sp.type == "VIEW_3D":
                         sp.clip_start, sp.clip_end = 10, 300000
+    return obs
 
 
 if A.get("cameras"):
     cams = json.load(open(A["cameras"], encoding="utf-8"))
     cfg = cams.get("cfg", {})
-    for cam in cams["cameras"]:
-        add_camera(bpy.context.scene, cam, cam.get("name") or "Camera", cfg)
+    sc = bpy.context.scene
+    obs = [add_camera(sc, cam, cam.get("name") or "Camera", cfg) for cam in cams["cameras"]]
+    scene_meta(sc, cfg)
+    make_thumbs(sc, obs, cfg.get("thumbs"))
+    _no_sync_handler()
     bpy.ops.wm.save_as_mainfile(filepath=bpy.data.filepath, compress=True)
     print("SAVED", bpy.data.filepath, flush=True)
 else:
     CFG = json.load(open(A["scene"], encoding="utf-8"))
-    build(CFG)
+    obs = build(CFG)
+    make_thumbs(bpy.context.scene, obs, CFG.get("thumbs"))
+    _no_sync_handler()
     for im in bpy.data.images:
         if im.filepath:
             im.pack()

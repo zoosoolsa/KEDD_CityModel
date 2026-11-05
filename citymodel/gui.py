@@ -128,7 +128,7 @@ class App(tk.Tk):
         ttk.Spinbox(g, from_=0.0, to=1.0, increment=0.05, textvariable=self.v_ao, width=5).grid(row=0, column=3, sticky="w")
         ttk.Checkbutton(f, text="이면도로 포함", variable=self.v_minor).pack(anchor="w", **pad)
         ttk.Checkbutton(f, text="브이월드 API로 건물 높이 보완", variable=self.v_api).pack(anchor="w", **pad)
-        ttk.Checkbutton(f, text="완료 후 미리보기 렌더", variable=self.v_prev).pack(anchor="w", **pad)
+        ttk.Checkbutton(f, text="카메라 썸네일 만들기", variable=self.v_prev).pack(anchor="w", **pad)
         cf = ttk.Frame(f)
         cf.pack(anchor="w", **pad)
         self.col_btns = {}
@@ -156,11 +156,34 @@ class App(tk.Tk):
         self.nb.pack(fill="both", expand=True)
         self.txt = tk.Text(right, height=11, wrap="word", font=("Menlo" if sys.platform == "darwin" else "Consolas", 10))
         self.txt.pack(fill="both", expand=False, pady=(6, 0))
+        t_cam = ttk.Frame(self.nb, padding=6)
         t_lib = ttk.Frame(self.nb, padding=6)
         t_set = ttk.Frame(self.nb, padding=6)
+        self.nb.add(t_cam, text="카메라")
         self.nb.add(t_lib, text="건물 데이터")
         self.nb.add(t_set, text="설정")
-        self._fixed_tabs = 2
+        self.TAB_SET = 2
+
+        # 카메라 탭 (프로젝트의 카메라 히스토리)
+        st = ttk.Style(self)
+        st.configure("Cam.Treeview", rowheight=84)
+        self.tc = ttk.Treeview(t_cam, columns=("name", "created", "label"), show="tree headings", style="Cam.Treeview",
+                               selectmode="browse")
+        self.tc.heading("#0", text="미리보기")
+        self.tc.column("#0", width=140, stretch=False)
+        for c, tx, w in [("name", "카메라", 170), ("created", "만든 날짜", 120), ("label", "시점", 360)]:
+            self.tc.heading(c, text=tx)
+            self.tc.column(c, width=w, anchor="w")
+        self.tc.pack(fill="both", expand=True)
+        self.tc.bind("<Double-1>", lambda e: self._open_blend(self.tc.focus() or None))
+        cb_ = ttk.Frame(t_cam)
+        cb_.pack(fill="x", pady=(6, 0))
+        ttk.Button(cb_, text="Blender에서 이 카메라로 열기", command=lambda: self._open_blend(self.tc.focus() or None)).pack(side="left")
+        ttk.Label(cb_, text="Blender 에서는 3D 뷰 사이드바(N) → KEDD 탭에서 썸네일을 눌러 카메라를 바꿀 수 있어요.",
+                  foreground=DIM).pack(side="left", padx=8)
+        self._thumbs = {}
+        self.cb_proj.bind("<<ComboboxSelected>>", lambda e: self._refresh_cams())
+        self.cb_proj.bind("<FocusOut>", lambda e: self._refresh_cams())
 
         # 건물 데이터 탭
         top = ttk.Frame(t_lib)
@@ -226,11 +249,12 @@ class App(tk.Tk):
         self.v_ao.set(s.ao_strength)
         self.v_minor.set(s.include_minor_roads)
         self.v_api.set(s.api_heights)
-        self.v_prev.set(s.preview_render)
+        self.v_prev.set(s.thumbnails)
         self.v_key.set(vworld_api.get_key())
         for k, b in self.col_btns.items():
             b.config(bg=_lin2hex(getattr(s, k)))
         self._refresh_lib()
+        self._refresh_cams()
 
     def _ui_to_settings(self):
         s = self.s
@@ -248,7 +272,7 @@ class App(tk.Tk):
         s.ao_strength = float(self.v_ao.get())
         s.include_minor_roads = bool(self.v_minor.get())
         s.api_heights = bool(self.v_api.get())
-        s.preview_render = bool(self.v_prev.get())
+        s.thumbnails = bool(self.v_prev.get())
         try:
             s.save(SETTINGS_FILE)
         except Exception:
@@ -351,7 +375,7 @@ class App(tk.Tk):
     def _open_map(self):
         if not vworld_api.get_key():
             messagebox.showinfo("브이월드", "설정 탭에서 브이월드 인증키를 먼저 저장하세요.")
-            self.nb.select(1)
+            self.nb.select(self.TAB_SET)
             return
         self._calc_init()
         if not self.server:
@@ -460,16 +484,43 @@ class App(tk.Tk):
         self.cancel = True
         self._log("중지 요청…")
 
-    def _open_blend(self):
+    def _open_blend(self, camera=None):
         p = os.path.join(self._proj_dir(), f"{os.path.basename(self._proj_dir())}.blend")
         if not os.path.exists(p):
             messagebox.showinfo("Blender", "아직 이 프로젝트의 .blend 가 없습니다.")
             return
         b = self.v_blender.get().strip() or blender_runner.find_blender()
         if b:
-            subprocess.Popen([b, p])
+            blender_runner.open_blend(b, p, camera)
         else:
             open_path(p)
+
+    def _refresh_cams(self):
+        import json
+        from PIL import Image, ImageTk
+        for i in self.tc.get_children():
+            self.tc.delete(i)
+        self._thumbs = {}
+        pj = os.path.join(self._proj_dir(), "project.json")
+        try:
+            cams = json.load(open(pj, encoding="utf-8")).get("cameras", [])
+        except Exception:
+            cams = []
+        for c in reversed(cams):                      # 최신이 위
+            name = c.get("name", "?")
+            ph = ""
+            tp = os.path.join(self._proj_dir(), "thumbs", f"{c.get('id', name)}.png")
+            if os.path.exists(tp):
+                try:
+                    im = Image.open(tp)
+                    im.thumbnail((124, 80))
+                    ph = ImageTk.PhotoImage(im)
+                    self._thumbs[name] = ph
+                except Exception:
+                    ph = ""
+            iid = name if not self.tc.exists(name) else None
+            kw = dict(image=ph) if ph else {}
+            self.tc.insert("", "end", iid=iid, values=(name, (c.get("created") or "").replace("T", " "), c.get("label", c.get("kind", ""))), **kw)
 
     # ================================================================ 기타
     def _pick_work(self):
@@ -515,7 +566,7 @@ class App(tk.Tk):
                 ("dem_files", "DEM GeoTIFF 직접 지정 (;로 구분, 비우면 자동)", "files"),
                 ("osm_max_age_days", "OSM 자동 갱신 주기 (일)", "int"),
                 ("min_building_area", "최소 건물 면적 (m²)", "num"), ("default_height", "높이 없는 건물 기본 높이 (m)", "num"),
-                ("road_offset", "도로 판 높이 (m)", "num"), ("ao_distance", "AO 거리 (m)", "num"),
+                ("bridge_end_offset", "다리 끝 높이 (m)", "num"), ("ao_distance", "AO 거리 (m)", "num"),
                 ("render_w", "렌더 가로 (px)", "int"), ("render_h", "렌더 세로 (px)", "int"), ("samples", "렌더 샘플", "int")]
         for r, (k, lab, typ) in enumerate(rows):
             ttk.Label(w, text=lab).grid(row=r, column=0, sticky="e", **pad)
@@ -570,33 +621,17 @@ class App(tk.Tk):
                     if val:
                         out, how = val
                         self.lbl_map.config(text="카메라를 추가했습니다." if how == "camera" else "생성을 마쳤습니다.")
-                        pv = os.path.join(self._proj_dir(), "preview.png")
-                        if os.path.exists(pv) and how != "camera":
-                            self._show_previews([pv])
-                        if out and messagebox.askyesno("완료", f"{out}\n\nBlender 로 열까요?"):
-                            self._open_blend()
+                        self._refresh_cams()
+                        self.nb.select(0)
+                        kids = self.tc.get_children()
+                        if out and messagebox.askyesno("완료", f"{out}\n\nBlender 로 열까요? (방금 만든 카메라 뷰로 열립니다)\n"
+                                                             "※ 이미 Blender 에서 열려 있다면 파일 → 되돌리기(Revert)로 다시 불러오세요."):
+                            self._open_blend(kids[0] if kids else None)
                     else:
                         self.lbl_map.config(text="지도에서 구도를 잡고 [이 시점으로 생성]을 누르세요.")
         except queue.Empty:
             pass
         self.after(100, self._poll)
-
-    def _show_previews(self, paths):
-        from PIL import Image, ImageTk
-        for t in self.nb.tabs()[self._fixed_tabs:]:
-            self.nb.forget(t)
-        self.preview_imgs = []
-        self.update_idletasks()
-        W = max(400, self.nb.winfo_width() - 10)
-        H = max(300, self.nb.winfo_height() - 30)
-        for p in paths:
-            im = Image.open(p)
-            im.thumbnail((W, H))
-            ph = ImageTk.PhotoImage(im)
-            self.preview_imgs.append(ph)
-            self.nb.add(ttk.Label(self.nb, image=ph), text="미리보기")
-        if paths:
-            self.nb.select(self._fixed_tabs)
 
 
 def main():
