@@ -1,0 +1,49 @@
+name: build
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: windows-latest
+            name: windows-x64
+          - os: macos-14          # Apple Silicon
+            name: macos-arm64
+          - os: macos-13          # Intel Mac
+            name: macos-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: Install
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt pyinstaller
+      - name: Smoke test (import)
+        run: python -c "import citymodel.pipeline, citymodel.gui; print('ok')"
+      - name: Build
+        run: pyinstaller packaging/citymodel.spec --noconfirm --distpath dist --workpath build
+      - name: Package (Windows)
+        if: runner.os == 'Windows'
+        run: Compress-Archive -Path dist/KEDD-CityModel/* -DestinationPath KEDD-CityModel-${{ matrix.name }}.zip
+      - name: Package (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          cd dist
+          ditto -c -k --keepParent KEDD-CityModel.app ../KEDD-CityModel-${{ matrix.name }}.zip
+      - uses: actions/upload-artifact@v4
+        with:
+          name: KEDD-CityModel-${{ matrix.name }}
+          path: KEDD-CityModel-${{ matrix.name }}.zip
+      - name: Release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v2
+        with:
+          files: KEDD-CityModel-${{ matrix.name }}.zip
