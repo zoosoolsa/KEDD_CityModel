@@ -67,7 +67,7 @@ def material(name, color, rough=0.85):
 
 
 def ground_material(name, img_path, cfg):
-    """지면 텍스처 RGBA: R=녹지, G=물, B=주요 도로, A=이면도로"""
+    """지면 텍스처: R=녹지, G=물 (도로는 roads.py 의 드레이프 면)"""
     m = bpy.data.materials.new(name)
     m.use_nodes = True
     nt = m.node_tree
@@ -113,10 +113,7 @@ def ground_material(name, img_path, cfg):
         return mx
 
     mg = mix("녹지", None, cfg["col_green"], sep.outputs[0])
-    m2 = mix("이면도로", mg.outputs["Color"], cfg["col_road"],
-             tex.outputs["Alpha"] if cfg.get("minor_roads", True) else None)
-    m1 = mix("도로", m2.outputs["Color"], cfg["col_road"], sep.outputs[2])
-    mw = mix("물", m1.outputs["Color"], cfg["col_water"], sep.outputs[1])
+    mw = mix("물", mg.outputs["Color"], cfg["col_water"], sep.outputs[1])
     rough = nt.nodes.new("ShaderNodeMath")
     rough.operation = "MULTIPLY_ADD"
     rough.inputs[1].default_value = -0.65
@@ -126,7 +123,7 @@ def ground_material(name, img_path, cfg):
     L.new(rough.outputs["Value"], bsdf.inputs["Roughness"])
     set_spec(bsdf, 0.25)
     L.new(bsdf.outputs["BSDF"], out.inputs["Surface"])
-    for i, n in enumerate([tex, sep, mg, m2, m1, mw, bsdf, out]):
+    for i, n in enumerate([tex, sep, mg, mw, bsdf, out]):
         n.location = (i * 230 - 800, 0)
     return m
 
@@ -143,8 +140,9 @@ def terrain_tile(name, d, loc, exag, cfg, coll):
     X, Y = np.meshgrid(xs, ys)
     V = np.c_[X.ravel(), Y.ravel(), z.ravel() * exag]
     i = (np.arange(H - 1)[:, None] * W + np.arange(W - 1)[None, :]).ravel()
-    loops = np.c_[i, i + W, i + W + 1, i + 1].ravel()
-    ob = make_mesh(name, V, loops, np.full(len(i), 4, np.int32), coll, smooth=True, loc=loc)
+    # 삼각형으로 고정 (대각선 v00-v11) — 도로 드레이프(roads.py)와 같은 분할이라 높이가 정확히 일치
+    loops = np.c_[i, i + W, i + W + 1, i, i + W + 1, i + 1].ravel()
+    ob = make_mesh(name, V, loops, np.full(2 * len(i), 3, np.int32), coll, smooth=True, loc=loc)
     me = ob.data
     uvl = me.uv_layers.new(name="UVMap")
     li = np.zeros(len(me.loops), np.int32)

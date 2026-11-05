@@ -491,7 +491,9 @@ class App(tk.Tk):
             return
         b = self.v_blender.get().strip() or blender_runner.find_blender()
         if b:
-            blender_runner.open_blend(b, p, camera)
+            how = blender_runner.open_blend(b, p, camera)
+            if how == "live":
+                self._log(f"열려 있는 Blender 에서 카메라를 '{camera or '활성'}'(으)로 바꿨습니다.")
         else:
             open_path(p)
 
@@ -624,9 +626,12 @@ class App(tk.Tk):
                         self._refresh_cams()
                         self.nb.select(0)
                         kids = self.tc.get_children()
-                        if out and messagebox.askyesno("완료", f"{out}\n\nBlender 로 열까요? (방금 만든 카메라 뷰로 열립니다)\n"
-                                                             "※ 이미 Blender 에서 열려 있다면 파일 → 되돌리기(Revert)로 다시 불러오세요."):
-                            self._open_blend(kids[0] if kids else None)
+                        newest = kids[0] if kids else None
+                        if out and blender_runner.is_live(out):
+                            blender_runner.send_live(out, newest, revert=True)
+                            self._log("열려 있는 Blender 에서 파일을 다시 불러오고 새 카메라로 바꿨습니다.")
+                        elif out and messagebox.askyesno("완료", f"{out}\n\nBlender 로 열까요? (방금 만든 카메라 뷰로 열립니다)"):
+                            self._open_blend(newest)
                     else:
                         self.lbl_map.config(text="지도에서 구도를 잡고 [이 시점으로 생성]을 누르세요.")
         except queue.Empty:

@@ -1,7 +1,7 @@
 bl_info = {
     "name": "KEDD CityModel 카메라",
     "author": "KEDD",
-    "version": (1, 0, 0),
+    "version": (1, 1, 0),
     "blender": (3, 3, 0),
     "location": "3D 뷰 > 사이드바(N) > KEDD",
     "description": "KEDD CityModel 카메라 히스토리 — 썸네일을 눌러 활성 카메라·뷰 전환",
@@ -285,6 +285,91 @@ class KEDD_OT_cam_delete(bpy.types.Operator):
         return {"FINISHED"}
 
 
+# ------------------------------------------------------------------ 앱과 연결 (열려 있는 파일 감지)
+#   <파일>.blend.kedd_live : Blender 가 1초마다 갱신 (앱은 이걸 보고 '이미 열려 있음' 판단)
+#   <파일>.blend.kedd_cmd  : 앱이 쓰는 명령 {"camera": 이름, "revert": true/false}
+_state = {"pending": None, "last_live": 0.0}
+
+
+def _main_window():
+    wm = bpy.context.window_manager
+    return wm.windows[0] if wm and wm.windows else None
+
+
+def _notify(msg):
+    print("KEDD:", msg)
+    win = _main_window()
+    if not win:
+        return
+    try:
+        def draw(self, context):
+            self.layout.label(text=msg)
+        with bpy.context.temp_override(window=win):
+            bpy.context.window_manager.popup_menu(draw, title="KEDD CityModel", icon="INFO")
+    except Exception:
+        pass
+
+
+def _tick():
+    import time
+    try:
+        fp = bpy.data.filepath
+        if not fp:
+            return 1.0
+        now = time.time()
+        if now - _state["last_live"] > 1.5:
+            try:
+                with open(fp + ".kedd_live", "w", encoding="utf-8") as f:
+                    json.dump({"pid": os.getpid(), "t": now}, f)
+            except Exception:
+                pass
+            _state["last_live"] = now
+        cp = fp + ".kedd_cmd"
+        if os.path.exists(cp):
+            try:
+                cmd = json.load(open(cp, encoding="utf-8"))
+            except Exception:
+                cmd = {}
+            try:
+                os.remove(cp)
+            except Exception:
+                pass
+            cam = cmd.get("camera")
+            if cmd.get("revert"):
+                if bpy.data.is_dirty:
+                    _state["pending"] = None
+                    _notify("앱에서 모델/카메라가 갱신됐어요. 저장 안 한 변경이 있어 자동으로 다시 불러오지 않았어요 → 파일 > 되돌리기")
+                else:
+                    _state["pending"] = cam
+                    win = _main_window()
+                    if win:
+                        with bpy.context.temp_override(window=win):
+                            bpy.ops.wm.revert_mainfile()
+                    return 0.5
+            elif cam:
+                _state["pending"] = cam
+        if _state["pending"]:
+            ob = bpy.data.objects.get(_state["pending"])
+            if ob is not None and ob.type == "CAMERA":
+                ctx = bpy.context
+                lst = cams()
+                win = _main_window()
+                if win:
+                    with ctx.temp_override(window=win):
+                        if ob in lst:
+                            ctx.scene.kedd_cam_index = lst.index(ob)
+                        activate(bpy.context, ob)
+            _state["pending"] = None
+    except Exception as e:
+        print("KEDD tick", e)
+    return 0.5
+
+
+@bpy.app.handlers.persistent
+def _load_post(*_):
+    _state["last_live"] = 0.0
+
+
 @bpy.app.handlers.persistent
 def _save_post(*_):
     try:
@@ -303,9 +388,17 @@ def register():
     bpy.types.Scene.kedd_cam_index = IntProperty(name="카메라", default=0, update=_on_index)
     if _save_post not in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.append(_save_post)
+    if _load_post not in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.append(_load_post)
+    if not bpy.app.background and not bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.register(_tick, first_interval=1.0, persistent=True)
 
 
 def unregister():
+    if bpy.app.timers.is_registered(_tick):
+        bpy.app.timers.unregister(_tick)
+    if _load_post in bpy.app.handlers.load_post:
+        bpy.app.handlers.load_post.remove(_load_post)
     if _save_post in bpy.app.handlers.save_post:
         bpy.app.handlers.save_post.remove(_save_post)
     del bpy.types.Scene.kedd_cam_index
@@ -315,22 +408,17 @@ def unregister():
 
 
 def _open_with_camera(name):
-    def go():
-        ctx = bpy.context
-        ob = bpy.data.objects.get(name)
-        if ob is None or ob.type != "CAMERA":
-            return None
-        lst = cams()
-        if ob in lst:
-            ctx.scene.kedd_cam_index = lst.index(ob)
-        activate(ctx, ob)
-        return None
-    bpy.app.timers.register(go, first_interval=0.8)
+    _state["pending"] = name
 
 
 if __name__ == "__main__":
+    a = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
+    cam = a[a.index("--kedd-camera") + 1] if "--kedd-camera" in a else None
     if not hasattr(bpy.types, "KEDD_PT_cameras"):
         register()
-    a = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
-    if "--kedd-camera" in a:
-        _open_with_camera(a[a.index("--kedd-camera") + 1])
+        if cam:
+            _open_with_camera(cam)
+    elif cam and bpy.data.filepath:
+        # 애드온이 이미 켜져 있음 → 그 애드온의 타이머가 읽도록 명령 파일로 전달
+        with open(bpy.data.filepath + ".kedd_cmd", "w", encoding="utf-8") as f:
+            json.dump({"camera": cam}, f)

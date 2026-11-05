@@ -20,4 +20,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="KEDD-CityModel", cons
 coll = COLLECT(exe, a.binaries, a.datas, name="KEDD-CityModel")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="KEDD-CityModel.app", bundle_identifier="kr.kedd.citymodel",
-                 info_plist={"NSHighResolutionCapable": True, "CFBundleShortVersionString": "2.1.0"})
+                 info_plist={"NSHighResolutionCapable": True, "CFBundleShortVersionString": "2.2.0"})

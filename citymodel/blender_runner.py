@@ -55,7 +55,7 @@ def addon_path():
     return os.path.join(os.path.dirname(scene_script_path()), "kedd_cameras.py")
 
 
-ADDON_VERSION = "1.0.0"
+ADDON_VERSION = "1.1.0"
 _MARK = os.path.join(os.path.expanduser("~"), ".kedd_citymodel_addon.json")
 
 
@@ -89,12 +89,45 @@ def install_addon(blender, log=print):
     return False
 
 
+def is_live(blend, max_age=5.0):
+    """이 .blend 가 KEDD 패널이 켜진 Blender 에 지금 열려 있는지"""
+    import json
+    import time
+    try:
+        d = json.load(open(blend + ".kedd_live", encoding="utf-8"))
+        return time.time() - float(d.get("t", 0)) < max_age
+    except Exception:
+        return False
+
+
+def send_live(blend, camera=None, revert=False):
+    """열려 있는 Blender 에 명령 (카메라 전환 / 파일 다시 불러오기)"""
+    import json
+    tmp = blend + ".kedd_cmd.tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        json.dump({"camera": camera, "revert": bool(revert)}, f, ensure_ascii=False)
+    os.replace(tmp, blend + ".kedd_cmd")
+    _raise_blender()
+
+
+def _raise_blender():
+    try:
+        if sys.platform == "darwin":
+            subprocess.Popen(["osascript", "-e", 'tell application "Blender" to activate'])
+    except Exception:
+        pass
+
+
 def open_blend(blender, blend, camera=None):
-    """Blender GUI 로 열기 — 카메라 패널을 띄우고, camera 가 있으면 그 카메라 뷰로"""
+    """이미 열려 있으면 그 창에서 카메라만 전환, 아니면 Blender 로 열기 (패널 포함, camera 뷰로)"""
+    if is_live(blend):
+        send_live(blend, camera)
+        return "live"
     cmd = [blender, blend, "--python", addon_path()]
     if camera:
         cmd += ["--", "--kedd-camera", camera]
-    return subprocess.Popen(cmd)
+    subprocess.Popen(cmd)
+    return "opened"
 
 
 def _copy_script(dst_dir):

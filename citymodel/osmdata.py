@@ -9,7 +9,10 @@ from .util import download, Reporter
 GEOFABRIK = "https://download.geofabrik.de/asia/south-korea-latest.osm.pbf"
 
 KEEP_HW = {'motorway', 'motorway_link', 'trunk', 'trunk_link', 'primary', 'primary_link', 'secondary',
-           'secondary_link', 'tertiary', 'tertiary_link', 'residential', 'unclassified', 'living_street'}
+           'secondary_link', 'tertiary', 'tertiary_link', 'residential', 'unclassified', 'living_street',
+           'service', 'pedestrian'}
+SKIP_SERVICE = {'parking_aisle', 'driveway', 'drive-through', 'emergency_access'}
+EXTRACT_VERSION = 2       # 추출 규칙이 바뀌면 올림 (캐시 무효화)
 GREEN_L = {'forest', 'grass', 'meadow', 'recreation_ground', 'village_green', 'cemetery', 'greenfield',
            'orchard', 'plant_nursery'}
 GREEN_LE = {'park', 'garden', 'golf_course', 'nature_reserve', 'common'}
@@ -46,6 +49,8 @@ class _Handler(osmium.SimpleHandler):
         rw = t.get('railway')
         br = t.get('bridge')
         if not ((hw in KEEP_HW) or (rw in ('rail', 'subway', 'light_rail') and br and br != 'no')):
+            return
+        if hw == 'service' and t.get('service') in SKIP_SERVICE:
             return
         if t.get('tunnel') not in (None, 'no') or t.get('area') == 'yes':
             return
@@ -102,7 +107,7 @@ def ensure_pbf(s, rep: Reporter, max_age_days=None):
 
 def get_osm(s, rep: Reporter):
     """반환: dict(ways, buildings, green, water)  (WGS84)"""
-    key = hashlib.md5(("%.4f,%.4f,%.4f,%.4f|" % s.bbox + (s.osm_pbf or "auto")).encode()).hexdigest()[:10]
+    key = hashlib.md5(("%.4f,%.4f,%.4f,%.4f|" % s.bbox + (s.osm_pbf or "auto") + f"|v{EXTRACT_VERSION}").encode()).hexdigest()[:10]
     cache = os.path.join(s.cache_dir, "osm", f"extract_{key}.pkl")
     pbf, _ = ensure_pbf(s, rep)
     if os.path.exists(cache) and os.path.getmtime(cache) > os.path.getmtime(pbf):

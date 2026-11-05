@@ -3,7 +3,7 @@
 작업폴더/
   store.json                     전체 설정 (타일 크기, 지형 과장, 버전)
   tiles/<ix>_<iy>/               4km 타일 (EPSG:5186, 남서 모서리 = ix*T, iy*T)
-      terrain.npz  landcover.png(R녹지 G물 B도로 A이면도로)  bld.npz  br.npz  meta.json
+      terrain.npz  landcover.png(R녹지 G물)  bld.npz  rd_major.npz  rd_minor.npz(지형에 얹은 도로)  br.npz  meta.json
   projects/<이름>/
       <이름>.blend  project.json (타일 목록·버전, 카메라 목록, 원점)
 """
@@ -19,7 +19,7 @@ from .util import MeshAcc, Terrain, Reporter, to_tm, to_ll
 
 Image.MAX_IMAGE_PIXELS = None
 TILE = 4000.0
-TILE_VERSION = 4          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
+TILE_VERSION = 6          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
 KINDS = ("bld", "rd_major", "rd_minor", "br")
 
 
@@ -286,7 +286,7 @@ def _save_terrain_tiles(store, comp, terrain, lcs, lres, rep=None):
         os.makedirs(d, exist_ok=True)
         np.savez_compressed(os.path.join(d, "terrain.npz"), z=z[1:-1, 1:-1], zpad=z, water=w, res=res)
         img = lcs.render_tile((tx0, ty1 - T, tx0 + T, ty1), terrain, lres)
-        Image.fromarray(img, "RGBA").save(os.path.join(d, "landcover.png"), compress_level=6)
+        Image.fromarray(img, "RGB").save(os.path.join(d, "landcover.png"), compress_level=6)
         if rep:
             rep.progress((i + 1) / len(comp))
 
