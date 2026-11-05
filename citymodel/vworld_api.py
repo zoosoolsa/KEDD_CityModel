@@ -1,4 +1,4 @@
-"""브이월드 오픈API: 인증키 보관 + 도로명주소건물(LT_C_SPBD) 수집.
+"""브이월드 오픈API: 인증키 보관 + 도로명주소건물(LT_C_SPBD)·연속지적도 도로 필지(LP_PA_CBND_BUBUN) 수집.
 
 - 키는 운영체제 키체인(macOS 키체인 / Windows 자격 증명 관리자)에 저장, 실패하면 홈 폴더 파일(권한 600)
 - 데이터 API 제한: 요청당 최대 1,000건, 범위 2km² 이하 → 1.4km 격자로 나눠 요청하고 칸마다 캐시
@@ -103,7 +103,51 @@ def test_key(key):
         return False, f"접속 실패: {e}"
 
 
-def _cell_fetch(key, cell, cache_dir):
+def _parse_spbd(f):
+    g = f.get("geometry") or {}
+    pr = f.get("properties") or {}
+    try:
+        fl = int(float(pr.get("gro_flo_co") or 0))
+    except ValueError:
+        fl = 0
+    out = []
+    polys = g.get("coordinates", []) if g.get("type") == "MultiPolygon" else [g.get("coordinates", [])]
+    for poly in polys:
+        if poly and len(poly[0]) >= 4:
+            out.append([fl, [[round(x, 2), round(y, 2)] for x, y in poly[0]]])
+    return out
+
+
+def jimok(jibun):
+    """'123-4도', '산 12 임' → '도' / '임' (지번 끝의 한글 한 글자)"""
+    s = (jibun or "").strip()
+    for ch in reversed(s):
+        if "\uac00" <= ch <= "\ud7a3":
+            return ch
+        if not ch.isspace():
+            break
+    return ""
+
+
+ROAD_JIMOK = {"도"}
+
+
+def _parse_cbnd(f):
+    """연속지적도 필지 → 지목이 도로(도)인 것만 [지목, [외곽, 구멍...]]"""
+    pr = f.get("properties") or {}
+    jm = jimok(pr.get("jibun"))
+    if jm not in ROAD_JIMOK:
+        return []
+    g = f.get("geometry") or {}
+    polys = g.get("coordinates", []) if g.get("type") == "MultiPolygon" else [g.get("coordinates", [])]
+    out = []
+    for poly in polys:
+        if poly and len(poly[0]) >= 4:
+            out.append([jm, [[[round(x, 2), round(y, 2)] for x, y in ring] for ring in poly if len(ring) >= 4]])
+    return out
+
+
+def _cell_fetch(key, cell, cache_dir, data="LT_C_SPBD", parse=_parse_spbd):
     p = os.path.join(cache_dir, f"{cell[0]}_{cell[1]}.json")
     if os.path.exists(p) and (time.time() - os.path.getmtime(p)) < CACHE_DAYS * 86400:
         return json.load(open(p, encoding="utf-8"))
@@ -113,7 +157,7 @@ def _cell_fetch(key, cell, cache_dir):
     while page <= total:
         for attempt in range(3):
             try:
-                feats, total = get_feature(key, "LT_C_SPBD", box, page=page)
+                feats, total = get_feature(key, data, box, page=page)
                 break
             except ApiError:
                 raise
@@ -122,26 +166,57 @@ def _cell_fetch(key, cell, cache_dir):
                     raise
                 time.sleep(1.5 * (attempt + 1))
         for f in feats:
-            g = f.get("geometry") or {}
-            pr = f.get("properties") or {}
-            try:
-                fl = int(float(pr.get("gro_flo_co") or 0))
-            except ValueError:
-                fl = 0
-            polys = g.get("coordinates", []) if g.get("type") == "MultiPolygon" else [g.get("coordinates", [])]
-            for poly in polys:
-                if poly and len(poly[0]) >= 4:
-                    out.append([fl, [[round(x, 2), round(y, 2)] for x, y in poly[0]]])
+            out.extend(parse(f))
         page += 1
-    json.dump(out, open(p, "w", encoding="utf-8"))
+    tmp = p + ".tmp"
+    json.dump(out, open(tmp, "w", encoding="utf-8"))
+    os.replace(tmp, p)
     return out
+
+
+def _cells(tm_bounds):
+    return [(i, j) for i in range(int(tm_bounds[0] // BOX), int(tm_bounds[2] // BOX) + 1)
+            for j in range(int(tm_bounds[1] // BOX), int(tm_bounds[3] // BOX) + 1)]
+
+
+def fetch_road_parcels(key, tm_bounds, cache_dir, rep: Reporter, workers=6):
+    """범위 안 지적도 도로 필지 → (폴리곤 목록 [ [외곽, 구멍...] (EPSG:5186) ], 받은 칸 집합)"""
+    os.makedirs(cache_dir, exist_ok=True)
+    cells = _cells(tm_bounds)
+    cached = sum(1 for c in cells if os.path.exists(os.path.join(cache_dir, f"{c[0]}_{c[1]}.json")))
+    rep.log(f"   브이월드 API 연속지적도(도로 필지): {len(cells)}칸 (캐시 {cached}칸)")
+    polys, ok, stop, done = [], set(), None, 0
+    seen = set()
+    with cf.ThreadPoolExecutor(max_workers=workers) as ex:
+        futs = {ex.submit(_cell_fetch, key, c, cache_dir, "LP_PA_CBND_BUBUN", _parse_cbnd): c for c in cells}
+        for f in cf.as_completed(futs):
+            done += 1
+            if done % 10 == 0:
+                rep.progress(done / len(cells))
+            try:
+                for _, rings in f.result():
+                    k = (round(rings[0][0][0], 1), round(rings[0][0][1], 1), len(rings[0]))
+                    if k not in seen:
+                        seen.add(k)
+                        polys.append(rings)
+                ok.add(futs[f])
+            except ApiError as e:
+                stop = str(e)
+                for g in futs:
+                    g.cancel()
+                break
+            except Exception as e:
+                stop = stop or str(e)
+    if stop:
+        rep.log(f"   ⚠ 지적도 일부 실패 ({stop}) — 받지 못한 곳은 OSM 도로 사용")
+    rep.log(f"   → 도로 필지 {len(polys):,}개")
+    return polys, ok
 
 
 def fetch_spbd(key, tm_bounds, cache_dir, rep: Reporter, workers=6):
     """범위 안 도로명주소건물 → list of (층수, ring ndarray(EPSG:5186)). 오류 시 가능한 만큼만."""
     os.makedirs(cache_dir, exist_ok=True)
-    cells = [(i, j) for i in range(int(tm_bounds[0] // BOX), int(tm_bounds[2] // BOX) + 1)
-             for j in range(int(tm_bounds[1] // BOX), int(tm_bounds[3] // BOX) + 1)]
+    cells = _cells(tm_bounds)
     cached = sum(1 for c in cells if os.path.exists(os.path.join(cache_dir, f"{c[0]}_{c[1]}.json")))
     rep.log(f"   브이월드 API 도로명주소건물: {len(cells)}칸 (캐시 {cached}칸)")
     res, done, stop = [], 0, None

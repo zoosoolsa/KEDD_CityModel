@@ -127,7 +127,7 @@ class App(tk.Tk):
         ttk.Label(g, text="AO").grid(row=0, column=2, sticky="e", **pad)
         ttk.Spinbox(g, from_=0.0, to=1.0, increment=0.05, textvariable=self.v_ao, width=5).grid(row=0, column=3, sticky="w")
         ttk.Checkbutton(f, text="이면도로 포함", variable=self.v_minor).pack(anchor="w", **pad)
-        ttk.Checkbutton(f, text="브이월드 API로 건물 높이 보완", variable=self.v_api).pack(anchor="w", **pad)
+        ttk.Checkbutton(f, text="브이월드 API 사용 (지적도 도로·건물 높이)", variable=self.v_api).pack(anchor="w", **pad)
         ttk.Checkbutton(f, text="카메라 썸네일 만들기", variable=self.v_prev).pack(anchor="w", **pad)
         cf = ttk.Frame(f)
         cf.pack(anchor="w", **pad)

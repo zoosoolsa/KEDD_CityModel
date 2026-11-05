@@ -52,8 +52,10 @@ def build_roads(s, osm, terrain, rep: Reporter, sink):
         elif w['hw'] != 'rail':
             (rmaj if w['hw'] in MAJOR else rmin).append((LineString(p), _width(w)))
 
-    rep.log(f"   도로 {len(rmaj):,} (주요) · {len(rmin):,} (이면) → 지형에 얹기")
-    drape_roads(terrain, rmaj, rmin, sink, rep, (0.3, 0.75))
+    rep.log(f"   OSM 도로 {len(rmaj):,} (주요) · {len(rmin):,} (이면)")
+    osm_pool = _osm_pool(rmaj, rmin)
+    cad_pool, covered = _cadastral_pool(s, terrain, osm_pool, rep, sink)
+    drape_roads(terrain, osm_pool, cad_pool, covered, sink, rep, (0.3, 0.75))
 
     # ---- 다리 ----
     if blines:
@@ -121,14 +123,8 @@ def build_roads(s, osm, terrain, rep: Reporter, sink):
 
 
 # ------------------------------------------------------------------ 도로 드레이프
-def drape_roads(terrain, rmaj, rmin, sink, rep, prog=(0.0, 1.0)):
-    """도로 폭으로 버퍼 → 200m 조각별로 합침 → 지형 삼각형(25m 격자, 대각선 v00-v11)마다 잘라
-    그 삼각형 평면 위에 놓는다. Blender 지형 메쉬와 같은 삼각형이므로 높이가 정확히 일치."""
-    cx, cy = terrain.origin
-    res, z, E = terrain.res, terrain.z, terrain.exag
-    x0, y0 = terrain.x0, terrain.y0              # 격자 (0,0) 로컬 좌표, 행은 아래(남)로
-    H, W = z.shape
-
+def _osm_pool(rmaj, rmin):
+    """OSM 도로 중심선 → 도로 폭 버퍼 (폴리곤 배열, 종류 0=주요 1=이면)"""
     def buffers(items):
         if not items:
             return np.array([], dtype=object)
@@ -136,13 +132,69 @@ def drape_roads(terrain, rmaj, rmin, sink, rep, prog=(0.0, 1.0)):
         wd = np.array([w for _, w in items]) / 2.0
         g = shapely.buffer(lines, wd, quad_segs=3, cap_style="round", join_style="round")
         return shapely.simplify(g, 0.2)
-
     bmaj, bmin = buffers(rmaj), buffers(rmin)
-    allb = np.concatenate([bmaj, bmin]) if len(bmaj) + len(bmin) else np.array([], dtype=object)
-    if not len(allb):
+    return np.concatenate([bmaj, bmin]), np.r_[np.zeros(len(bmaj), int), np.ones(len(bmin), int)]
+
+
+def _cadastral_pool(s, terrain, osm_pool, rep, sink):
+    """브이월드 연속지적도의 도로 필지 (GIS 건물과 같은 기준) — 인증키·API 사용이 켜져 있을 때.
+    주요/이면 구분: OSM 주요 도로 버퍼와 30% 이상 겹치면 주요."""
+    empty = (np.array([], dtype=object), np.array([], int)), set()
+    if not getattr(s, "api_heights", False):
+        return empty
+    from . import vworld_api
+    key = vworld_api.get_key()
+    if not key:
+        return empty
+    cx, cy = terrain.origin
+    ks, T = list(sink.keys), sink.T                       # 이번에 만드는 타일 범위만
+    b = (min(k[0] for k in ks) * T + 1, min(k[1] for k in ks) * T + 1,
+         (max(k[0] for k in ks) + 1) * T - 1, (max(k[1] for k in ks) + 1) * T - 1)
+    try:
+        polys, ok = vworld_api.fetch_road_parcels(key, b, os.path.join(s.cache_dir, "cbnd_road"), rep)
+    except Exception as e:
+        rep.log(f"   ⚠ 지적도 도로를 받지 못해 OSM 도로를 씁니다 ({e})")
+        return empty
+    if not polys:
+        return empty
+    geoms = []
+    for rings in polys:
+        try:
+            g = shapely.Polygon(np.asarray(rings[0]) - (cx, cy), [np.asarray(r) - (cx, cy) for r in rings[1:]])
+            if not g.is_valid:
+                g = shapely.make_valid(g)
+            geoms.append(g)
+        except Exception:
+            pass
+    geoms = shapely.simplify(np.array(geoms, dtype=object), 0.1)
+    kind = np.ones(len(geoms), int)
+    opolys, okind = osm_pool
+    maj = opolys[okind == 0]
+    if len(maj):
+        tr = shapely.STRtree(maj)
+        gi, mi = tr.query(geoms, predicate="intersects")
+        if len(gi):
+            ia = shapely.area(shapely.intersection(geoms[gi], maj[mi]))
+            frac = np.bincount(gi, weights=ia, minlength=len(geoms)) / np.maximum(shapely.area(geoms), 1e-6)
+            kind[frac > 0.3] = 0
+    rep.log(f"   지적도 도로 사용: 주요 {int((kind == 0).sum()):,} · 이면 {int((kind == 1).sum()):,} 필지")
+    return (geoms, kind), ok
+
+
+def drape_roads(terrain, osm_pool, cad_pool, covered, sink, rep, prog=(0.0, 1.0)):
+    """도로 면 → 200m 조각별로 합침 → 지형 삼각형(25m 격자, 대각선 v00-v11)마다 잘라
+    그 삼각형 평면 위에 놓는다. Blender 지형 메쉬와 같은 삼각형이므로 높이가 정확히 일치.
+    지적도를 받은 칸(covered, 1.4km 격자)은 지적도 도로, 나머지는 OSM 도로."""
+    from .vworld_api import BOX as CBOX
+    cx, cy = terrain.origin
+    res, z, E = terrain.res, terrain.z, terrain.exag
+    x0, y0 = terrain.x0, terrain.y0              # 격자 (0,0) 로컬 좌표, 행은 아래(남)로
+    H, W = z.shape
+    pools = []
+    for allb, kind in (osm_pool, cad_pool):
+        pools.append((allb, kind, shapely.STRtree(allb) if len(allb) else None))
+    if pools[0][2] is None and pools[1][2] is None:
         return
-    kind = np.r_[np.zeros(len(bmaj), int), np.ones(len(bmin), int)]
-    tree = shapely.STRtree(allb)
     gx0, gx1 = x0 + cx, x0 + cx + (W - 1) * res          # 전역 범위 (격자 안쪽만)
     gy1, gy0 = y0 + cy, y0 + cy - (H - 1) * res
     ix0, ix1 = int(np.ceil(gx0 / CHUNK)), int(np.floor(gx1 / CHUNK))
@@ -156,6 +208,11 @@ def drape_roads(terrain, rmaj, rmin, sink, rep, prog=(0.0, 1.0)):
             if done % 200 == 0:
                 rep.progress(prog[0] + (prog[1] - prog[0]) * done / nch)
             bx0, by0 = ix * CHUNK - cx, iy * CHUNK - cy          # 로컬
+            gcx, gcy = (ix + 0.5) * CHUNK, (iy + 0.5) * CHUNK     # 전역 중심
+            use_cad = (int(gcx // CBOX), int(gcy // CBOX)) in covered and pools[1][2] is not None
+            allb, kind, tree = pools[1] if use_cad else pools[0]
+            if tree is None:
+                continue
             box = shapely.box(bx0, by0, bx0 + CHUNK, by0 + CHUNK)
             idx = tree.query(box, predicate="intersects")
             if not len(idx):

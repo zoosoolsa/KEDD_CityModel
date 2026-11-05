@@ -55,7 +55,7 @@ def addon_path():
     return os.path.join(os.path.dirname(scene_script_path()), "kedd_cameras.py")
 
 
-ADDON_VERSION = "1.1.0"
+ADDON_VERSION = "1.2.0"
 _MARK = os.path.join(os.path.expanduser("~"), ".kedd_citymodel_addon.json")
 
 
@@ -94,7 +94,7 @@ def is_live(blend, max_age=5.0):
     import json
     import time
     try:
-        d = json.load(open(blend + ".kedd_live", encoding="utf-8"))
+        d = json.load(open(os.path.realpath(blend) + ".kedd_live", encoding="utf-8"))
         return time.time() - float(d.get("t", 0)) < max_age
     except Exception:
         return False
@@ -103,6 +103,7 @@ def is_live(blend, max_age=5.0):
 def send_live(blend, camera=None, revert=False):
     """열려 있는 Blender 에 명령 (카메라 전환 / 파일 다시 불러오기)"""
     import json
+    blend = os.path.realpath(blend)
     tmp = blend + ".kedd_cmd.tmp"
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump({"camera": camera, "revert": bool(revert)}, f, ensure_ascii=False)
@@ -118,15 +119,22 @@ def _raise_blender():
         pass
 
 
+_launched = {}
+
+
 def open_blend(blender, blend, camera=None):
     """이미 열려 있으면 그 창에서 카메라만 전환, 아니면 Blender 로 열기 (패널 포함, camera 뷰로)"""
-    if is_live(blend):
+    import time
+    blend = os.path.realpath(blend)
+    starting = time.time() - _launched.get(blend, 0) < 40      # 방금 띄운 Blender 가 아직 뜨는 중
+    if is_live(blend) or starting:
         send_live(blend, camera)
         return "live"
     cmd = [blender, blend, "--python", addon_path()]
     if camera:
         cmd += ["--", "--kedd-camera", camera]
     subprocess.Popen(cmd)
+    _launched[blend] = time.time()
     return "opened"
 
 

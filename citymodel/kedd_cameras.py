@@ -1,7 +1,7 @@
 bl_info = {
     "name": "KEDD CityModel 카메라",
     "author": "KEDD",
-    "version": (1, 1, 0),
+    "version": (1, 2, 0),
     "blender": (3, 3, 0),
     "location": "3D 뷰 > 사이드바(N) > KEDD",
     "description": "KEDD CityModel 카메라 히스토리 — 썸네일을 눌러 활성 카메라·뷰 전환",
@@ -316,6 +316,7 @@ def _tick():
         fp = bpy.data.filepath
         if not fp:
             return 1.0
+        fp = os.path.realpath(fp)
         now = time.time()
         if now - _state["last_live"] > 1.5:
             try:
@@ -416,9 +417,10 @@ if __name__ == "__main__":
     cam = a[a.index("--kedd-camera") + 1] if "--kedd-camera" in a else None
     if not hasattr(bpy.types, "KEDD_PT_cameras"):
         register()
-        if cam:
-            _open_with_camera(cam)
-    elif cam and bpy.data.filepath:
-        # 애드온이 이미 켜져 있음 → 그 애드온의 타이머가 읽도록 명령 파일로 전달
-        with open(bpy.data.filepath + ".kedd_cmd", "w", encoding="utf-8") as f:
-            json.dump({"camera": cam}, f)
+    elif not bpy.app.background:
+        # 설치된 애드온이 이미 패널을 등록함 (예전 버전일 수 있음) → 앱 연결 타이머는 이 스크립트가 직접 돌림
+        bpy.app.timers.register(_tick, first_interval=0.5, persistent=True)
+        if _load_post not in bpy.app.handlers.load_post:
+            bpy.app.handlers.load_post.append(_load_post)
+    if cam:
+        _open_with_camera(cam)

@@ -19,7 +19,7 @@ from .util import MeshAcc, Terrain, Reporter, to_tm, to_ll
 
 Image.MAX_IMAGE_PIXELS = None
 TILE = 4000.0
-TILE_VERSION = 6          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
+TILE_VERSION = 7          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
 KINDS = ("bld", "rd_major", "rd_minor", "br")
 
 
