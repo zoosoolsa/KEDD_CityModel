@@ -123,8 +123,10 @@ class App(tk.Tk):
         self.col_btns = {}
         for key, lab in [("col_green", "녹지"), ("col_water", "물"), ("col_road", "도로"), ("col_building", "건물")]:
             ttk.Label(cf, text=lab).pack(side="left")
-            b = tk.Button(cf, width=3, relief="groove", command=lambda k=key: self._pick_color(k))
-            b.pack(side="left", padx=(2, 10))
+            # macOS 기본 버튼은 배경색을 무시하므로 Label 을 색 견본으로 사용
+            b = tk.Label(cf, width=4, relief="solid", bd=1, cursor="hand2", text=" ")
+            b.pack(side="left", padx=(2, 10), ipady=2)
+            b.bind("<Button-1>", lambda e, k=key: self._pick_color(k))
             self.col_btns[key] = b
         ttk.Button(f, text="고급 설정…", command=self._advanced).grid(row=4, column=0, columnspan=4, sticky="w", **pad)
 
@@ -195,7 +197,7 @@ class App(tk.Tk):
         r = colorchooser.askcolor(color=_lin2hex(cur), title="색 선택")
         if r and r[1]:
             setattr(self.s, key, _hex2lin(r[1]))
-            self.col_btns[key].config(bg=r[1], activebackground=r[1])
+            self.col_btns[key].config(bg=r[1])
 
     def _advanced(self):
         w = tk.Toplevel(self)
@@ -261,7 +263,7 @@ class App(tk.Tk):
         self.v_prev.set(s.preview_render)
         for k, b in self.col_btns.items():
             h = _lin2hex(getattr(s, k))
-            b.config(bg=h, activebackground=h)
+            b.config(bg=h)
 
     def _ui_to_settings(self):
         s = self.s
