@@ -5,7 +5,7 @@ from dataclasses import dataclass, field, asdict
 from typing import List
 
 APP_NAME = "KEDD CityModel"
-APP_VERSION = "2.4.0"
+APP_VERSION = "2.4.1"
 
 # 대략적인 시/도 범위 (경도 min, 위도 min, 경도 max, 위도 max)
 PRESETS = {

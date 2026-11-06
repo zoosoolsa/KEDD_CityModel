@@ -57,6 +57,7 @@ class App(tk.Tk):
         self._build()
         self._load_to_ui()
         self.protocol("WM_DELETE_WINDOW", self._quit)
+        self._install_clipboard_keys()
         self.after(100, self._poll)
         self.after(600, lambda: self._fetch_catalog(silent=True))
         self.after(300, self._start_server)
@@ -219,8 +220,12 @@ class App(tk.Tk):
             ttk.Button(t_set, text="…", width=3, command=cmd).grid(row=r, column=2, **pad)
         ttk.Label(t_set, text="브이월드 인증키").grid(row=2, column=0, sticky="e", **pad)
         self.v_key = tk.StringVar()
-        ttk.Entry(t_set, textvariable=self.v_key, width=60, show="•").grid(row=2, column=1, sticky="we", **pad)
-        ttk.Button(t_set, text="저장·확인", command=self._save_key).grid(row=2, column=2, **pad)
+        self.e_key = ttk.Entry(t_set, textvariable=self.v_key, width=60, show="•")
+        self.e_key.grid(row=2, column=1, sticky="we", **pad)
+        kb = ttk.Frame(t_set)
+        kb.grid(row=2, column=2, sticky="w", **pad)
+        ttk.Button(kb, text="붙여넣기", command=lambda: self._paste_into(self.e_key, replace=True)).pack(side="left")
+        ttk.Button(kb, text="저장·확인", command=self._save_key).pack(side="left", padx=(4, 0))
         ttk.Label(t_set, text="인증키 발급 시 서비스 URL 은 http://localhost:47380 으로 입력하세요. 키는 이 컴퓨터에만 저장됩니다.",
                   foreground=DIM).grid(row=3, column=1, sticky="w", **pad)
         ttk.Button(t_set, text="고급 설정…", command=self._advanced).grid(row=4, column=1, sticky="w", **pad)
@@ -599,6 +604,86 @@ class App(tk.Tk):
     def _log(self, msg):
         self.txt.insert("end", msg + "\n")
         self.txt.see("end")
+
+    # ---------------------------------------------------------------- 복사·붙여넣기
+    # macOS 에서 한글 입력 상태일 때 Cmd+V 가 'ㅍ' 로 들어와 Tk 기본 붙여넣기가 동작하지 않음 →
+    # 자판 위치(가상 키코드)와 한글 자모까지 보고 직접 처리, 오른쪽 클릭 메뉴도 추가
+    _KEYS = {"v": ("v", "ㅍ", 9), "c": ("c", "ㅊ", 8), "x": ("x", "ㅌ", 7), "a": ("a", "ㅁ", 0)}
+
+    def _install_clipboard_keys(self):
+        mod = "Command" if sys.platform == "darwin" else "Control"
+        for cls in ("TEntry", "Entry", "TCombobox", "TSpinbox", "Text"):
+            self.bind_class(cls, f"<{mod}-Key>", self._on_mod_key, add="+")
+            self.bind_class(cls, "<Button-2>" if sys.platform == "darwin" else "<Button-3>", self._ctx_menu, add="+")
+            if sys.platform == "darwin":
+                self.bind_class(cls, "<Control-Button-1>", self._ctx_menu, add="+")
+
+    def _which(self, e):
+        ks, ch = (e.keysym or "").lower(), (e.char or "").lower()
+        kc = e.keycode >> 16 if e.keycode > 0xFFFF else e.keycode
+        for name, (en, ko, vk) in self._KEYS.items():
+            if ks in (en, ko) or ch in (en, ko) or (sys.platform == "darwin" and kc == vk and ks not in self._KEYS):
+                return name
+        return None
+
+    def _on_mod_key(self, e):
+        k = self._which(e)
+        if k is None:
+            return None
+        if (e.keysym or "").lower() == k:          # 영문 자판: Tk 기본 동작에 맡김
+            return None
+        w = e.widget
+        if k == "v":
+            self._paste_into(w)
+        elif k in ("c", "x"):
+            try:
+                if str(w.cget("show") if "show" in w.keys() else "") == "":
+                    self.clipboard_clear()
+                    self.clipboard_append(w.selection_get())
+                    if k == "x":
+                        w.delete("sel.first", "sel.last")
+            except Exception:
+                pass
+        elif k == "a":
+            try:
+                w.select_range(0, "end")
+                w.icursor("end")
+            except Exception:
+                w.tag_add("sel", "1.0", "end") if isinstance(w, tk.Text) else None
+        return "break"
+
+    def _paste_into(self, w, replace=False):
+        try:
+            s = self.clipboard_get()
+        except Exception:
+            return
+        s = s.strip() if not isinstance(w, tk.Text) else s
+        try:
+            if isinstance(w, tk.Text):
+                w.insert("insert", s)
+                return
+            if replace:
+                w.delete(0, "end")
+            else:
+                try:
+                    w.delete("sel.first", "sel.last")
+                except Exception:
+                    pass
+            w.insert("insert", s)
+            w.focus_set()
+        except Exception:
+            pass
+
+    def _ctx_menu(self, e):
+        w = e.widget
+        m = tk.Menu(self, tearoff=0)
+        m.add_command(label="붙여넣기", command=lambda: self._paste_into(w))
+        m.add_command(label="모두 지우고 붙여넣기", command=lambda: self._paste_into(w, replace=True))
+        try:
+            m.tk_popup(e.x_root, e.y_root)
+        finally:
+            m.grab_release()
+        return "break"
 
     def _poll(self):
         try:
