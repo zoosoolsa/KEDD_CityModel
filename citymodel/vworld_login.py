@@ -17,6 +17,8 @@ from .library import VWORLD_PAGE
 HOME = os.path.join(os.path.expanduser("~"), ".kedd_citymodel")
 SESSION_FILE = os.path.join(HOME, "vworld_session.json")
 WEB_STORAGE = os.path.join(HOME, "webview")
+# 브이월드 통합로그인 화면으로 바로 (로그인 후 메인으로 돌아옴 → 감지해서 창 닫음)
+LOGIN_URL = "https://www.vworld.kr/oidc/auth?endPoint=%2Fv4po_main.do&acrValues=3"
 DEFAULT_UA = ("Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 "
               "(KHTML, like Gecko) Version/17.0 Safari/605.1.15")
 
@@ -140,7 +142,7 @@ BANNER_JS = r"""
   if (document.getElementById('kedd-banner')) return;
   var d = document.createElement('div');
   d.id = 'kedd-banner';
-  d.textContent = 'KEDD CityModel — 브이월드에 로그인하세요. 로그인되면 이 창은 자동으로 닫히고 다운로드가 시작됩니다.';
+  d.textContent = '로그인하면 이 창은 자동으로 닫히고, 앱이 건물 데이터를 받기 시작합니다.';
   d.style.cssText = 'position:fixed;left:0;right:0;bottom:0;z-index:2147483647;background:#1f6feb;color:#fff;' +
                     'font:600 14px -apple-system,system-ui,sans-serif;padding:10px 16px;text-align:center;';
   document.body.appendChild(d);
@@ -157,7 +159,7 @@ def login_main(test_url):
         return 2
     os.makedirs(WEB_STORAGE, exist_ok=True)
     state = {"ok": False}
-    win = webview.create_window("브이월드 로그인 — KEDD CityModel", VWORLD_PAGE, width=1100, height=820)
+    win = webview.create_window("브이월드 로그인 — KEDD CityModel", LOGIN_URL, width=980, height=860)
 
     def cookie_header():
         parts = []
@@ -179,7 +181,8 @@ def login_main(test_url):
         while not state["ok"]:
             time.sleep(2)
             try:
-                win.evaluate_js(BANNER_JS)
+                if "vworld.kr" in (win.get_current_url() or ""):
+                    win.evaluate_js(BANNER_JS)
                 txt = win.evaluate_js("document.body ? document.body.innerText : ''") or ""
             except Exception:
                 txt = ""
