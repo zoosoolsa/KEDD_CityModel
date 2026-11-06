@@ -19,7 +19,7 @@ from .util import MeshAcc, Terrain, Reporter, to_tm, to_ll
 
 Image.MAX_IMAGE_PIXELS = None
 TILE = 4000.0
-TILE_VERSION = 9          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
+TILE_VERSION = 10          # 생성 방식이 바뀌면 올림 → 모든 타일 재생성
 KINDS = ("bld", "rd_major", "rd_minor", "br")
 # 종류별 평면 변 길이 상한 (m): 도로 조각은 25m 삼각형 안, 다리는 10m 간격, 건물은 큰 공장·역사도 수백 m
 MAX_EDGE = {"bld": 700.0, "rd_major": 40.0, "rd_minor": 40.0, "br": 80.0}

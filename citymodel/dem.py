@@ -94,7 +94,12 @@ def build_terrain(s, rep: Reporter, out_path, tm_bounds=None):
     else:
         water = np.zeros_like(flat)
     water = nd.binary_closing(water, iterations=4)
-    water = nd.binary_fill_holes(water)
+    # 물로 둘러싸인 구멍은 작은 것(배·부두·교각 등, 0.05km² 미만)만 메움 — 섬(영도 등)은 그대로 땅
+    holes = nd.binary_fill_holes(water) & ~water
+    if holes.any():
+        hl, hn = nd.label(holes)
+        hs = nd.sum(holes, hl, range(1, hn + 1)) * res * res
+        water |= np.isin(hl, 1 + np.where(hs < 50000)[0])
     water = nd.binary_opening(water, iterations=1)
     rep.progress(0.9)
 
@@ -114,7 +119,11 @@ def build_terrain(s, rep: Reporter, out_path, tm_bounds=None):
         wv = np.where(water, out, 0.0)
         wn = nd.gaussian_filter(water.astype(np.float32), 8.0)
         local = nd.gaussian_filter(wv, 8.0) / np.maximum(wn, 1e-3)
-        ground[water] = local[water] - 2.0
+        # 물가는 계단 대신 완만하게 (마스크를 부드럽게 한 비율로 섞음)
+        f = np.clip(nd.gaussian_filter(water.astype(np.float32), 0.8) * 1.6 - 0.3, 0, 1)
+        f[water] = 1.0
+        ok = wn > 1e-3
+        ground[ok] = ground[ok] * (1 - f[ok]) + (local[ok] - 2.0) * f[ok]
 
     np.savez_compressed(out_path, z=ground.astype(np.float32), water=water.astype(np.uint8), res=res,
                         x0=xmin - cx, y0=ymax - cy, water_level=wl, origin=np.array([cx, cy], float))

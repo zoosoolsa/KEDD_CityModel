@@ -64,15 +64,20 @@ class LandcoverSource:
 
         green = down(fill(self.green))
         water = down(fill(self.water)).astype(np.float32)
-        # 지형에서 찾은 물 (한강·바다 등)
+        # 지형에서 찾은 물 (한강·바다 등): 25m 물 격자를 영역 전체에서 부드럽게 한 뒤 픽셀 중심에서 보간
+        #  → 타일 경계에 테두리가 생기지 않고, 해안선이 계단 모양이 아니라 매끈한 선이 됨
+        ws = getattr(terrain, "_water_smooth", None)
+        if ws is None:
+            ws = nd.gaussian_filter(terrain.water.astype(np.float32), 0.9)
+            terrain._water_smooth = ws
         cx, cy = terrain.origin
         gx = x0 - cx + (np.arange(w) + 0.5) * res
         gy = y1 - cy - (np.arange(h) + 0.5) * res
-        fx = np.clip(np.round((gx - terrain.x0) / terrain.res).astype(int), 0, terrain.W - 1)
-        fy = np.clip(np.round((terrain.y0 - gy) / terrain.res).astype(int), 0, terrain.H - 1)
-        tw = terrain.water.astype(bool)[fy][:, fx]
-        tw = nd.binary_erosion(tw, iterations=max(1, int(round(5 / res))))
-        tw = nd.gaussian_filter(tw.astype(np.float32), 1.2 * 5 / res) * 255
+        fx = (gx - terrain.x0) / terrain.res
+        fy = (terrain.y0 - gy) / terrain.res
+        FY, FX = np.meshgrid(fy, fx, indexing="ij")
+        v = nd.map_coordinates(ws, [FY, FX], order=1, mode="nearest")
+        tw = np.clip((v - 0.4) / 0.2, 0, 1) * 255
         water = np.maximum(water, tw)
         green = np.minimum(green.astype(np.float32), 255 - water)
         img = np.dstack([green, water, np.zeros_like(water)]).clip(0, 255).astype(np.uint8)
