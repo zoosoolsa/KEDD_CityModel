@@ -6,7 +6,11 @@ import sys
 def main():
     ap = argparse.ArgumentParser(prog="citymodel")
     ap.add_argument("--config", help="settings.json 경로 (지정하면 GUI 없이 실행)")
+    ap.add_argument("--vworld-login", help=argparse.SUPPRESS)
     a, _ = ap.parse_known_args()
+    if a.vworld_login:
+        from .vworld_login import login_main
+        sys.exit(login_main(a.vworld_login))
     if a.config:
         from .config import Settings
         from .pipeline import run_job, bbox_camera, url_camera

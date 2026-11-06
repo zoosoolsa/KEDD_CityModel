@@ -4,7 +4,7 @@ import sys, os
 from PyInstaller.utils.hooks import collect_all, collect_data_files
 
 datas, binaries, hidden = [], [], []
-for pkg in ("pyproj", "osmium", "imagecodecs", "shapely", "certifi", "keyring"):
+for pkg in ("pyproj", "osmium", "imagecodecs", "shapely", "certifi", "keyring", "webview"):
     d, b, h = collect_all(pkg)
     datas += d; binaries += b; hidden += h
 ROOT = os.path.abspath(os.path.join(SPECPATH, ".."))
@@ -20,4 +20,4 @@ exe = EXE(pyz, a.scripts, [], exclude_binaries=True, name="KEDD-CityModel", cons
 coll = COLLECT(exe, a.binaries, a.datas, name="KEDD-CityModel")
 if sys.platform == "darwin":
     app = BUNDLE(coll, name="KEDD-CityModel.app", bundle_identifier="kr.kedd.citymodel",
-                 info_plist={"NSHighResolutionCapable": True, "CFBundleShortVersionString": "2.5.1"})
+                 info_plist={"NSHighResolutionCapable": True, "CFBundleShortVersionString": "2.6.0"})

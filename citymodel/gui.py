@@ -339,32 +339,81 @@ class App(tk.Tk):
         threading.Thread(target=work, daemon=True).start()
 
     def _download_selected(self):
+        if getattr(self, "_dl_busy", False):
+            messagebox.showinfo("받기", "이미 받는 중입니다. 로그를 확인하세요.")
+            return
         rows = [self._lib_rows[i] for i in self.tv.selection() if self._lib_rows[i]["state"] != "보유"]
         if not rows:
             rows = [r for r in self._lib_rows.values() if r["need"] and r["state"] != "보유"]
         if not rows:
             messagebox.showinfo("받기", "받을 항목이 없습니다. 목록에서 '없음' 항목을 선택하세요.")
             return
-        if any(r["latest"] == "?" for r in rows):
+        if any(r["latest"] == "?" or not r.get("url") for r in rows):
             messagebox.showwarning("받기", "브이월드 목록을 아직 불러오지 못했습니다. 잠시 후 다시 시도하세요.")
             self._fetch_catalog()
             return
         total = sum(int((r["size"] or "0MB").rstrip("MB") or 0) for r in rows)
-        if not messagebox.askyesno("받기", "다음 데이터를 받아 건물 데이터 폴더에 넣습니다.\n"
-                                         "(브라우저에서 브이월드에 로그인되어 있어야 합니다)\n\n"
+        if not messagebox.askyesno("받기", "다음 데이터를 받아 건물 데이터 폴더에 바로 넣습니다.\n"
+                                         "(브이월드 로그인이 필요하면 로그인 창이 한 번 뜹니다)\n\n"
                                          + "\n".join(f"· {r['name']} {r['latest']} ({r['size']})" for r in rows)
                                          + f"\n\n합계 약 {total:,}MB"):
             return
-        ok, msg = library.check_downloads_access()
-        if not ok:
-            messagebox.showwarning("다운로드 폴더", msg)
-        for r in rows:
-            webbrowser.open(r["url"])
-        self._log("브라우저에서 다운로드를 시작했습니다. 받기가 끝나면 자동으로 폴더로 옮기고 인덱스를 만듭니다.")
-        codes = [r["code"] for r in rows]
-        threading.Thread(target=library.download_watch,
-                         args=(self._lib(), codes, lambda m: self.q.put(("log", m)), lambda: self.q.put(("refresh_lib", None))),
-                         daemon=True).start()
+        self._dl_busy = True
+        lib = self._lib()
+
+        def log(m):
+            self.q.put(("log", m))
+
+        def work():
+            from . import vworld_login as vl
+            from .util import Reporter
+            try:
+                sess = vl.load_session()
+                test = rows[0]["url"]
+                if not vl.probe(sess, test):
+                    log("브이월드 로그인이 필요합니다 → 로그인 창을 엽니다 (로그인하면 자동으로 닫힙니다)")
+                    ok, why = vl.run_login(test)
+                    if not ok:
+                        log(f"✖ 받기를 멈췄습니다: {why}. 로그인 후 [선택 받기]를 다시 누르거나, "
+                            f"직접 받은 zip 을 [파일 직접 추가…]로 넣어 주세요.")
+                        return
+                    sess = vl.load_session()
+                    log("✔ 브이월드 로그인 확인")
+                for r in rows:
+                    code = r["code"]
+                    date = r["latest"].replace("-", "")
+                    dest = os.path.join(lib, f"AL_D010_{code}_{date}.zip")
+                    os.makedirs(lib, exist_ok=True)
+                    log(f"받는 중: {r['name']} ({r['size']})")
+                    pct = {"v": -10}
+
+                    def prog(got, tot, name=r["name"]):
+                        if tot:
+                            p = int(got * 100 / tot)
+                            if p >= pct["v"] + 10:
+                                pct["v"] = p - p % 10
+                                log(f"   {name} {p}%  ({got / 1e6:,.0f}/{tot / 1e6:,.0f}MB)")
+                    try:
+                        vl.download(sess, r["url"], dest, prog)
+                    except vl.LoginRequired:
+                        vl.clear_session()
+                        log("✖ 받는 도중 로그인이 풀렸습니다. [선택 받기]를 다시 누르면 로그인 창이 뜹니다.")
+                        return
+                    except Exception as e:
+                        log(f"✖ {r['name']} 받기 실패: {e}")
+                        continue
+                    log(f"✔ {r['name']} 받기 완료 → 인덱스 생성 중 (큰 시도는 몇 분)")
+                    try:
+                        library.build_index(lib, code, date, dest, Reporter(log=log))
+                        library.remove_old(lib)
+                        log(f"✔ {r['name']} 준비 완료")
+                    except Exception as e:
+                        log(f"인덱스 생성 실패: {e}")
+                    self.q.put(("refresh_lib", None))
+            finally:
+                self._dl_busy = False
+                self.q.put(("refresh_lib", None))
+        threading.Thread(target=work, daemon=True).start()
 
     def _add_files(self):
         """받아 둔 zip(또는 풀린 폴더)을 직접 골라 가져오기 — 다운로드 폴더 접근이 막혀 있어도 동작"""
