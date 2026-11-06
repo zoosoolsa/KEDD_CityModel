@@ -54,7 +54,7 @@ def build_roads(s, osm, terrain, rep: Reporter, sink):
 
     rep.log(f"   OSM 도로 {len(rmaj):,} (주요) · {len(rmin):,} (이면)")
     osm_pool = _osm_pool(rmaj, rmin)
-    cad_pool, covered = _cadastral_pool(s, terrain, osm_pool, rep, sink)
+    cad_pool, covered = _cadastral_pool(s, terrain, osm, rep, sink)
     drape_roads(terrain, osm_pool, cad_pool, covered, sink, rep, (0.3, 0.75))
 
     # ---- 다리 ----
@@ -136,10 +136,14 @@ def _osm_pool(rmaj, rmin):
     return np.concatenate([bmaj, bmin]), np.r_[np.zeros(len(bmaj), int), np.ones(len(bmin), int)]
 
 
-def _cadastral_pool(s, terrain, osm_pool, rep, sink):
-    """브이월드 연속지적도의 도로 필지 (GIS 건물과 같은 기준) — 인증키·API 사용이 켜져 있을 때.
-    주요/이면 구분: OSM 주요 도로 버퍼와 30% 이상 겹치면 주요."""
-    empty = (np.array([], dtype=object), np.array([], int)), set()
+NONROAD_SKIP = {"도"}          # 이 지목은 도로로 취급 (나머지 필지는 도로가 아님)
+
+
+def _cadastral_pool(s, terrain, osm, rep, sink):
+    """브이월드 연속지적도 (GIS 건물과 같은 기준) — 인증키·API 사용이 켜져 있을 때.
+    도로 = 칸 전체 − 도로가 아닌 필지 − 물. ('도' 필지 + 지적도에 필지가 없는 공공 도로 빈 곳)
+    반환: (도로 아닌 필지 배열, 물 폴리곤 배열), 다 받은 칸 집합"""
+    empty = None, set()
     if not getattr(s, "api_heights", False):
         return empty
     from . import vworld_api
@@ -151,14 +155,16 @@ def _cadastral_pool(s, terrain, osm_pool, rep, sink):
     b = (min(k[0] for k in ks) * T + 1, min(k[1] for k in ks) * T + 1,
          (max(k[0] for k in ks) + 1) * T - 1, (max(k[1] for k in ks) + 1) * T - 1)
     try:
-        polys, ok = vworld_api.fetch_road_parcels(key, b, os.path.join(s.cache_dir, "cbnd_road"), rep)
+        parcels, ok = vworld_api.fetch_parcels(key, b, os.path.join(s.cache_dir, "cbnd"), rep)
     except Exception as e:
-        rep.log(f"   ⚠ 지적도 도로를 받지 못해 OSM 도로를 씁니다 ({e})")
+        rep.log(f"   ⚠ 지적도를 받지 못해 OSM 도로를 씁니다 ({e})")
         return empty
-    if not polys:
+    if not parcels or not ok:
         return empty
     geoms = []
-    for rings in polys:
+    for jm, rings in parcels:
+        if jm in NONROAD_SKIP:
+            continue
         try:
             g = shapely.Polygon(np.asarray(rings[0]) - (cx, cy), [np.asarray(r) - (cx, cy) for r in rings[1:]])
             if not g.is_valid:
@@ -166,19 +172,70 @@ def _cadastral_pool(s, terrain, osm_pool, rep, sink):
             geoms.append(g)
         except Exception:
             pass
-    geoms = shapely.simplify(np.array(geoms, dtype=object), 0.1)
-    kind = np.ones(len(geoms), int)
-    opolys, okind = osm_pool
-    maj = opolys[okind == 0]
-    if len(maj):
-        tr = shapely.STRtree(maj)
-        gi, mi = tr.query(geoms, predicate="intersects")
-        if len(gi):
-            ia = shapely.area(shapely.intersection(geoms[gi], maj[mi]))
-            frac = np.bincount(gi, weights=ia, minlength=len(geoms)) / np.maximum(shapely.area(geoms), 1e-6)
-            kind[frac > 0.3] = 0
-    rep.log(f"   지적도 도로 사용: 주요 {int((kind == 0).sum()):,} · 이면 {int((kind == 1).sum()):,} 필지")
-    return (geoms, kind), ok
+    # 물 (OSM 물 폴리곤 + 지형에서 찾은 물) — 강은 필지가 없는 곳이 많아 도로로 오인하지 않게
+    water = []
+    from shapely import wkb
+    for gb in osm.get("water", []):
+        try:
+            g = wkb.loads(gb)
+            for pg in (g.geoms if g.geom_type == "MultiPolygon" else [g]):
+                lon, lat = np.asarray(pg.exterior.coords).T[:2]
+                X, Y = to_tm(lon, lat)
+                water.append(shapely.Polygon(np.c_[X - cx, Y - cy]).buffer(0))
+        except Exception:
+            pass
+    water += _terrain_water_polys(terrain)
+    rep.log(f"   지적도로 도로 영역 계산 (도로 아닌 필지 {len(geoms):,}개, 물 {len(water):,}개)")
+    return (np.array(geoms, dtype=object), np.array(water, dtype=object)), ok
+
+
+def _terrain_water_polys(terrain):
+    """지형 물 마스크(25m) → 폴리곤 (로컬)"""
+    w = terrain.water.astype(bool)
+    if not w.any():
+        return []
+    res = terrain.res
+    out = []
+    # 행 단위 연속 구간 → 직사각형 (단순·충분)
+    H, W = w.shape
+    for r in range(H):
+        row = w[r]
+        if not row.any():
+            continue
+        d = np.diff(np.r_[0, row.astype(np.int8), 0])
+        st, en = np.where(d == 1)[0], np.where(d == -1)[0]
+        y1 = terrain.y0 - (r - 0.5) * res
+        for a, b in zip(st, en):
+            out.append(shapely.box(terrain.x0 + (a - 0.5) * res, y1 - res, terrain.x0 + (b - 0.5) * res, y1))
+    if not out:
+        return []
+    u = shapely.union_all(np.array(out, dtype=object))
+    return list(getattr(u, "geoms", [u]))
+
+
+def _cad_roads(cad, box, maj_tree, maj):
+    """한 조각(200m)의 지적도 도로 영역 → (주요, 이면)"""
+    nonroad, water, t1, t2 = cad
+    idx = t1.query(box, predicate="intersects")
+    occ = shapely.union_all(nonroad[idx]) if len(idx) else None
+    road = shapely.difference(box, occ) if occ is not None else box
+    wi = t2.query(box, predicate="intersects") if t2 is not None else []
+    if len(wi):
+        road = shapely.difference(road, shapely.union_all(water[wi]))
+    if road.is_empty:
+        return None, None
+    road = shapely.buffer(shapely.buffer(road, -0.6, join_style="mitre"), 0.6, join_style="mitre")   # 필지 사이 틈 제거
+    if road.is_empty:
+        return None, None
+    parts = [g for g in getattr(road, "geoms", [road]) if g.geom_type == "Polygon" and g.area >= 25]
+    if not parts:
+        return None, None
+    road = shapely.union_all(np.array(parts, dtype=object))
+    mi = maj_tree.query(box, predicate="intersects") if maj_tree is not None else []
+    if len(mi):
+        zone = shapely.buffer(shapely.union_all(maj[mi]), 6.0)
+        return shapely.intersection(road, zone), shapely.difference(road, zone)
+    return None, road
 
 
 def drape_roads(terrain, osm_pool, cad_pool, covered, sink, rep, prog=(0.0, 1.0)):
@@ -190,10 +247,15 @@ def drape_roads(terrain, osm_pool, cad_pool, covered, sink, rep, prog=(0.0, 1.0)
     res, z, E = terrain.res, terrain.z, terrain.exag
     x0, y0 = terrain.x0, terrain.y0              # 격자 (0,0) 로컬 좌표, 행은 아래(남)로
     H, W = z.shape
-    pools = []
-    for allb, kind in (osm_pool, cad_pool):
-        pools.append((allb, kind, shapely.STRtree(allb) if len(allb) else None))
-    if pools[0][2] is None and pools[1][2] is None:
+    allb0, kind0 = osm_pool
+    tree0 = shapely.STRtree(allb0) if len(allb0) else None
+    maj = allb0[kind0 == 0] if len(allb0) else allb0
+    maj_tree = shapely.STRtree(maj) if len(maj) else None
+    cad = None
+    if cad_pool is not None:
+        nonroad, water = cad_pool
+        cad = (nonroad, water, shapely.STRtree(nonroad), shapely.STRtree(water) if len(water) else None)
+    if tree0 is None and cad is None:
         return
     gx0, gx1 = x0 + cx, x0 + cx + (W - 1) * res          # 전역 범위 (격자 안쪽만)
     gy1, gy0 = y0 + cy, y0 + cy - (H - 1) * res
@@ -209,24 +271,26 @@ def drape_roads(terrain, osm_pool, cad_pool, covered, sink, rep, prog=(0.0, 1.0)
                 rep.progress(prog[0] + (prog[1] - prog[0]) * done / nch)
             bx0, by0 = ix * CHUNK - cx, iy * CHUNK - cy          # 로컬
             gcx, gcy = (ix + 0.5) * CHUNK, (iy + 0.5) * CHUNK     # 전역 중심
-            use_cad = (int(gcx // CBOX), int(gcy // CBOX)) in covered and pools[1][2] is not None
-            allb, kind, tree = pools[1] if use_cad else pools[0]
-            if tree is None:
-                continue
+            use_cad = cad is not None and (int(gcx // CBOX), int(gcy // CBOX)) in covered
             box = shapely.box(bx0, by0, bx0 + CHUNK, by0 + CHUNK)
-            idx = tree.query(box, predicate="intersects")
-            if not len(idx):
-                continue
             if sink.get("rd_major", bx0 + CHUNK / 2, by0 + CHUNK / 2) is None:
                 continue                                         # 이 영역이 담당하지 않는 타일
-            gmaj = shapely.union_all(allb[idx[kind[idx] == 0]]) if (kind[idx] == 0).any() else None
-            gmin = shapely.union_all(allb[idx[kind[idx] == 1]]) if (kind[idx] == 1).any() else None
-            if gmaj is not None:
-                gmaj = shapely.intersection(gmaj, box)
-            if gmin is not None:
-                gmin = shapely.intersection(gmin, box)
+            if use_cad:
+                gmaj, gmin = _cad_roads(cad, box, maj_tree, maj)
+            else:
+                if tree0 is None:
+                    continue
+                idx = tree0.query(box, predicate="intersects")
+                if not len(idx):
+                    continue
+                gmaj = shapely.union_all(allb0[idx[kind0[idx] == 0]]) if (kind0[idx] == 0).any() else None
+                gmin = shapely.union_all(allb0[idx[kind0[idx] == 1]]) if (kind0[idx] == 1).any() else None
                 if gmaj is not None:
-                    gmin = shapely.difference(gmin, gmaj)
+                    gmaj = shapely.intersection(gmaj, box)
+                if gmin is not None:
+                    gmin = shapely.intersection(gmin, box)
+                    if gmaj is not None:
+                        gmin = shapely.difference(gmin, gmaj)
             # 이 조각의 삼각형들
             c0 = int(round((bx0 - x0) / res))
             r0 = int(round((y0 - (by0 + CHUNK)) / res))
