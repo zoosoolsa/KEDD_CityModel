@@ -60,6 +60,10 @@ class App(tk.Tk):
         self._install_clipboard_keys()
         self.after(100, self._poll)
         self.after(600, lambda: self._fetch_catalog(silent=True))
+        self.after(1500, lambda: threading.Thread(
+            target=library.import_existing,
+            args=(self._lib(), lambda m: self.q.put(("log", m)), lambda: self.q.put(("refresh_lib", None))),
+            daemon=True).start())
         self.after(300, self._start_server)
         if not self.s.blender_path:
             b = blender_runner.find_blender()
@@ -208,6 +212,7 @@ class App(tk.Tk):
         bot = ttk.Frame(t_lib)
         bot.pack(fill="x")
         ttk.Button(bot, text="선택 받기", command=self._download_selected).pack(side="left")
+        ttk.Button(bot, text="파일 직접 추가…", command=self._add_files).pack(side="left", padx=(4, 0))
         self.lbl_lib = ttk.Label(bot, text="", foreground=DIM, wraplength=560)
         self.lbl_lib.pack(side="left", padx=8)
 
@@ -350,6 +355,9 @@ class App(tk.Tk):
                                          + "\n".join(f"· {r['name']} {r['latest']} ({r['size']})" for r in rows)
                                          + f"\n\n합계 약 {total:,}MB"):
             return
+        ok, msg = library.check_downloads_access()
+        if not ok:
+            messagebox.showwarning("다운로드 폴더", msg)
         for r in rows:
             webbrowser.open(r["url"])
         self._log("브라우저에서 다운로드를 시작했습니다. 받기가 끝나면 자동으로 폴더로 옮기고 인덱스를 만듭니다.")
@@ -357,6 +365,34 @@ class App(tk.Tk):
         threading.Thread(target=library.download_watch,
                          args=(self._lib(), codes, lambda m: self.q.put(("log", m)), lambda: self.q.put(("refresh_lib", None))),
                          daemon=True).start()
+
+    def _add_files(self):
+        """받아 둔 zip(또는 풀린 폴더)을 직접 골라 가져오기 — 다운로드 폴더 접근이 막혀 있어도 동작"""
+        from tkinter import filedialog as fd
+        paths = fd.askopenfilenames(title="AL_D010_시도코드_날짜.zip 선택", initialdir=library.downloads_dir(),
+                                    filetypes=[("zip", "*.zip"), ("모든 파일", "*")])
+        if not paths:
+            return
+        lib = self._lib()
+
+        def work():
+            from .util import Reporter
+            for p in paths:
+                m = library.DLNAME.match(os.path.basename(p))
+                if not m:
+                    self.q.put(("log", f"이름 형식이 아닙니다 (AL_D010_코드_날짜.zip): {os.path.basename(p)}"))
+                    continue
+                code, date = m.group(1), m.group(2)
+                try:
+                    dest = library.import_download(lib, code, date, p, os.path.isdir(p), move=False)
+                    self.q.put(("log", f"✔ {library.SIDO.get(code, code)} 가져옴 → 인덱스 생성 중"))
+                    library.build_index(lib, code, date, dest, Reporter(log=lambda m_: self.q.put(("log", m_))))
+                    library.remove_old(lib)
+                    self.q.put(("log", f"✔ {library.SIDO.get(code, code)} 준비 완료"))
+                except Exception as e:
+                    self.q.put(("log", f"가져오기 실패 {os.path.basename(p)}: {e}"))
+                self.q.put(("refresh_lib", None))
+        threading.Thread(target=work, daemon=True).start()
 
     def _pick_lib(self):
         d = filedialog.askdirectory(initialdir=self._lib())

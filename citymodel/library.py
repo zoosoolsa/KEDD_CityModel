@@ -28,6 +28,8 @@ SIDO = {
     "48": "경상남도", "50": "제주특별자치도", "51": "강원특별자치도", "52": "전북특별자치도",
 }
 FNAME = re.compile(r"AL_D010_(\d{2})_(\d{8})\.zip$", re.I)
+# 다운로드 폴더의 변형: 'AL_D010_28_20261009 (1).zip', '-1.zip', Safari 가 자동으로 푼 폴더
+DLNAME = re.compile(r"AL_D010_(\d{2})_(\d{8})(?:[ _-]*\(?\d*\)?)?(\.zip)?$", re.I)
 VWORLD_PAGE = "https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18"   # GIS건물통합정보 다운로드 페이지
 DS_ID = "20171128DS00010"
 CATALOG_URL = ("https://www.vworld.kr/dtmk/dtmk_ntads_s002.do?svcCde=NA&dsId=18&fileGbnCd=AL&formatSelect=SHP"
@@ -366,45 +368,164 @@ def overview(lib, bbox=None):
     return rows, fetched
 
 
-def download_watch(lib, codes, rep_log, done_cb=None, timeout_min=45, stop=lambda: False):
-    """다운로드 폴더를 지켜보다가 요청한 시도의 AL_D010 zip 이 다 받아지면 라이브러리로 옮기고 인덱스까지 만든다."""
+def downloads_dir():
+    return os.path.join(os.path.expanduser("~"), "Downloads")
+
+
+def check_downloads_access():
+    """다운로드 폴더를 읽을 수 있는지 (macOS 는 앱별 허용 필요) → (ok, 메시지)"""
+    dl = downloads_dir()
+    try:
+        os.listdir(dl)
+        return True, ""
+    except PermissionError:
+        return False, ("macOS 가 이 앱의 '다운로드' 폴더 접근을 막고 있습니다. 시스템 설정 → 개인정보 보호 및 보안 → "
+                       "파일 및 폴더 → KEDD-CityModel → '다운로드 폴더'를 켜 주세요. (또는 [파일 직접 추가…] 사용)")
+    except FileNotFoundError:
+        return False, f"다운로드 폴더가 없습니다: {dl}"
+
+
+def zip_folder(folder, dest_zip):
+    """Safari 가 자동으로 푼 폴더 → zip (shp 묶음만)"""
+    tmp = dest_zip + ".part"
+    with zipfile.ZipFile(tmp, "w", zipfile.ZIP_DEFLATED) as z:
+        for root, _, files in os.walk(folder):
+            for f in files:
+                if f.startswith("._") or f == ".DS_Store":
+                    continue
+                fp = os.path.join(root, f)
+                z.write(fp, os.path.relpath(fp, folder))
+    os.replace(tmp, dest_zip)
+    return dest_zip
+
+
+def _dl_candidates(dl):
+    """다운로드 폴더의 후보 → [(code, date, path, is_dir)]"""
+    out = []
+    try:
+        names = os.listdir(dl)
+    except Exception:
+        return out
+    for n in names:
+        if n.endswith((".crdownload", ".download", ".part")):
+            continue
+        m = DLNAME.match(n)
+        if not m:
+            continue
+        p = os.path.join(dl, n)
+        isdir = os.path.isdir(p)
+        if isdir and not glob.glob(os.path.join(p, "**", "*.shp"), recursive=True):
+            continue
+        if not isdir and not n.lower().endswith(".zip"):
+            continue
+        out.append((m.group(1), m.group(2), p, isdir))
+    return out
+
+
+def import_download(lib, code, date, path, isdir, move=True):
+    """다운로드 폴더의 zip/풀린 폴더 → 라이브러리의 정식 이름 zip"""
+    os.makedirs(lib, exist_ok=True)
+    dest = os.path.join(lib, f"AL_D010_{code}_{date}.zip")
+    if not os.path.exists(dest):
+        if isdir:
+            zip_folder(path, dest)
+        else:
+            (shutil.move if move else shutil.copy2)(path, dest)
+    return dest
+
+
+def _size_of(p):
+    if os.path.isdir(p):
+        return sum(os.path.getsize(os.path.join(r, f)) for r, _, fs in os.walk(p) for f in fs)
+    return os.path.getsize(p)
+
+
+def import_existing(lib, rep_log, done_cb=None):
+    """앱 시작 때: 이미 다운로드 폴더에 받아져 있는(폴더보다 새로운) 건물 zip 을 가져온다."""
     import time as _t
     from .util import Reporter
-    dl = os.path.join(os.path.expanduser("~"), "Downloads")
+    if not check_downloads_access()[0]:
+        return
+    cur = scan(lib) if os.path.isdir(lib) else {}
+    cands = [c for c in _dl_candidates(downloads_dir()) if not (cur.get(c[0]) and cur[c[0]]["date"] >= c[1])]
+    if not cands:
+        return
+    s0 = {c[2]: _size_of(c[2]) for c in cands}
+    _t.sleep(2)
+    done = set()
+    for code, date, p, isdir in sorted(cands, key=lambda c: c[1], reverse=True):
+        if code in done or _size_of(p) != s0[p]:
+            continue
+        rep_log(f"다운로드 폴더에서 {SIDO.get(code, code)} 건물 데이터를 찾아 가져옵니다")
+        try:
+            dest = import_download(lib, code, date, p, isdir)
+            if isdir:
+                shutil.rmtree(p, ignore_errors=True)
+            build_index(lib, code, date, dest, Reporter(log=rep_log))
+            rep_log(f"✔ {SIDO.get(code, code)} 준비 완료")
+            done.add(code)
+        except Exception as e:
+            rep_log(f"가져오기 실패 {os.path.basename(p)}: {e}")
+    if done:
+        remove_old(lib)
+        if done_cb:
+            done_cb()
+
+
+def download_watch(lib, codes, rep_log, done_cb=None, timeout_min=60, stop=lambda: False):
+    """다운로드 폴더를 지켜보다가 요청한 시도의 AL_D010 zip(또는 Safari 가 푼 폴더)이 다 받아지면
+    라이브러리로 옮기고 인덱스까지 만든다."""
+    import time as _t
+    from .util import Reporter
+    dl = downloads_dir()
+    ok, msg = check_downloads_access()
+    if not ok:
+        rep_log("⚠ " + msg)
+        return
     want = set(codes)
     t0 = _t.time()
-    sizes = {}
+    sizes, seen, last_note = {}, set(), 0
+    rep_log(f"다운로드 폴더 감시 중: {dl} (받기가 끝나면 자동으로 가져옵니다)")
     while want and _t.time() - t0 < timeout_min * 60 and not stop():
         cur = scan(lib) if os.path.isdir(lib) else {}
-        for p in glob.glob(os.path.join(dl, "AL_D010_*.zip")):
-            m = FNAME.search(os.path.basename(p))
-            if not m or m.group(1) not in want:
+        for code, date, p, isdir in _dl_candidates(dl):
+            if code not in want:
                 continue
-            if cur.get(m.group(1)) and cur[m.group(1)]["date"] >= m.group(2):
-                want.discard(m.group(1))
+            if cur.get(code) and cur[code]["date"] >= date:
+                want.discard(code)
+                rep_log(f"{SIDO.get(code, code)} 는 이미 폴더에 있습니다")
                 continue
-            if any(os.path.exists(p + ext) for ext in (".crdownload", ".download", ".part")):
+            if p not in seen:
+                seen.add(p)
+                rep_log(f"발견: {os.path.basename(p)}{' (Safari 가 푼 폴더)' if isdir else ''} — 받기 완료 확인 중")
+            try:
+                sz = _size_of(p)
+            except OSError:
                 continue
-            sz = os.path.getsize(p)
             if sizes.get(p) != sz or sz == 0:          # 크기가 두 번 연속 같아야 완료로 봄
                 sizes[p] = sz
                 continue
             try:
-                got = import_files(lib, [p], move=True)
+                dest = import_download(lib, code, date, p, isdir)
+                if isdir:
+                    shutil.rmtree(p, ignore_errors=True)
             except Exception as e:
                 rep_log(f"가져오기 실패 {os.path.basename(p)}: {e}")
                 continue
-            code = m.group(1)
             want.discard(code)
-            rep_log(f"✔ {SIDO.get(code, code)} 건물 데이터를 폴더로 옮겼습니다 → 인덱스 생성 중")
+            rep_log(f"✔ {SIDO.get(code, code)} 건물 데이터를 폴더로 옮겼습니다 → 인덱스 생성 중 (큰 시도는 몇 분)")
             try:
-                build_index(lib, code, m.group(2), got[0] if got else os.path.join(lib, os.path.basename(p)),
-                            Reporter(log=rep_log))
+                build_index(lib, code, date, dest, Reporter(log=rep_log))
+                rep_log(f"✔ {SIDO.get(code, code)} 준비 완료")
             except Exception as e:
                 rep_log(f"인덱스 생성 실패: {e}")
             remove_old(lib)
             if done_cb:
                 done_cb()
+        if want and _t.time() - last_note > 120:
+            last_note = _t.time()
+            if _t.time() - t0 > 100:
+                rep_log("아직 기다리는 중: " + ", ".join(SIDO.get(c, c) for c in want))
         _t.sleep(3)
     if want and not stop():
         rep_log("다운로드를 기다리다 시간이 지났습니다: " + ", ".join(SIDO.get(c, c) for c in want))
